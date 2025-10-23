@@ -29,6 +29,7 @@ jobs:
         with:
           version: latest
           args: --timeout=5m
+          go-version: ${{ env.GO_VERSION }} # Add this line to specify the Go version
 
   test:
     name: Test
