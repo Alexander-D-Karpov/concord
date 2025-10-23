@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package concord.stream.v1;
+
+option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/stream/v1;streamv1";
+
+import "google/protobuf/timestamp.proto";
+import "common/v1/types.proto";
+
+message Subscribe {
+  repeated string room_ids = 1;
+}
+
+message Unsubscribe {
+  repeated string room_ids = 1;
+}
+
+message Ack {
+  string event_id = 1;
+}
+
+message ClientEvent {
+  oneof payload {
+    Subscribe subscribe = 1;
+    Unsubscribe unsubscribe = 2;
+    Ack ack = 3;
+  }
+}
+
+message MessageCreated {
+  concord.common.v1.Message message = 1;
+}
+
+message MessageEdited {
+  concord.common.v1.Message message = 1;
+}
+
+message MessageDeleted {
+  string message_id = 1;
+  string room_id = 2;
+}
+
+message MemberJoined {
+  concord.common.v1.Member member = 1;
+}
+
+message MemberRemoved {
+  string room_id = 1;
+  string user_id = 2;
+}
+
+message VoiceStateChanged {
+  string room_id = 1;
+  string user_id = 2;
+  bool muted = 3;
+  bool video_enabled = 4;
+  bool speaking = 5;
+}
+
+message RoomUpdated {
+  concord.common.v1.Room room = 1;
+}
+
+message RoleChanged {
+  string room_id = 1;
+  string user_id = 2;
+  concord.common.v1.Role new_role = 3;
+}
+
+message ServerEvent {
+  string event_id = 1;
+  google.protobuf.Timestamp created_at = 2;
+  oneof payload {
+    MessageCreated message_created = 10;
+    MessageEdited message_edited = 11;
+    MessageDeleted message_deleted = 12;
+    MemberJoined member_joined = 13;
+    MemberRemoved member_removed = 14;
+    VoiceStateChanged voice_state_changed = 15;
+    RoomUpdated room_updated = 16;
+    RoleChanged role_changed = 17;
+  }
+}
+
+service StreamService {
+  rpc EventStream(stream ClientEvent) returns (stream ServerEvent);
+}

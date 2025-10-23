@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package concord.membership.v1;
+
+option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/membership/v1;membershipv1";
+
+import "common/v1/types.proto";
+
+message InviteRequest {
+  string room_id = 1;
+  string user_id = 2;
+}
+
+message RemoveRequest {
+  string room_id = 1;
+  string user_id = 2;
+}
+
+message SetRoleRequest {
+  string room_id = 1;
+  string user_id = 2;
+  concord.common.v1.Role role = 3;
+}
+
+message ListMembersRequest {
+  string room_id = 1;
+}
+
+message ListMembersResponse {
+  repeated concord.common.v1.Member members = 1;
+}
+
+message EmptyResponse {}
+
+service MembershipService {
+  rpc Invite(InviteRequest) returns (concord.common.v1.Member);
+  rpc Remove(RemoveRequest) returns (EmptyResponse);
+  rpc SetRole(SetRoleRequest) returns (concord.common.v1.Member);
+  rpc ListMembers(ListMembersRequest) returns (ListMembersResponse);
+}

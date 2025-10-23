@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package concord.users.v1;
+
+option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/users/v1;usersv1";
+
+import "common/v1/types.proto";
+
+message GetSelfRequest {}
+
+message GetUserRequest {
+  string user_id = 1;
+}
+
+message UpdateProfileRequest {
+  string display_name = 1;
+  string avatar_url = 2;
+}
+
+service UsersService {
+  rpc GetSelf(GetSelfRequest) returns (concord.common.v1.User);
+  rpc GetUser(GetUserRequest) returns (concord.common.v1.User);
+  rpc UpdateProfile(UpdateProfileRequest) returns (concord.common.v1.User);
+}

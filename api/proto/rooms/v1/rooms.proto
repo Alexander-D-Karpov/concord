@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package concord.rooms.v1;
+
+option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/rooms/v1;roomsv1";
+
+import "common/v1/types.proto";
+
+message CreateRoomRequest {
+  string name = 1;
+  string voice_server_id = 2;
+  string region = 3;
+}
+
+message GetRoomRequest {
+  string room_id = 1;
+}
+
+message ListRoomsForUserRequest {}
+
+message ListRoomsForUserResponse {
+  repeated concord.common.v1.Room rooms = 1;
+}
+
+message AttachVoiceServerRequest {
+  string room_id = 1;
+  string voice_server_id = 2;
+}
+
+message DeleteRoomRequest {
+  string room_id = 1;
+}
+
+message EmptyResponse {}
+
+service RoomsService {
+  rpc CreateRoom(CreateRoomRequest) returns (concord.common.v1.Room);
+  rpc GetRoom(GetRoomRequest) returns (concord.common.v1.Room);
+  rpc ListRoomsForUser(ListRoomsForUserRequest) returns (ListRoomsForUserResponse);
+  rpc AttachVoiceServer(AttachVoiceServerRequest) returns (concord.common.v1.Room);
+  rpc DeleteRoom(DeleteRoomRequest) returns (EmptyResponse);
+}

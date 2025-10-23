@@ -1,0 +1,136 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:14-alpine
+    container_name: concord-postgres
+    environment:
+      POSTGRES_DB: concord
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - concord-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: concord-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - concord-network
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    container_name: concord-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: concord
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_ENABLED: "true"
+      GRPC_PORT: 9090
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-in-production}
+      VOICE_JWT_SECRET: ${VOICE_JWT_SECRET:-dev-voice-secret}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: json
+      RATE_LIMIT_ENABLED: "true"
+      RATE_LIMIT_REQUESTS_PER_MINUTE: 60
+      RATE_LIMIT_BURST: 10
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    networks:
+      - concord-network
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:9090"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  voice:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.voice
+    container_name: concord-voice
+    depends_on:
+      - api
+    environment:
+      VOICE_UDP_HOST: 0.0.0.0
+      VOICE_UDP_PORT_START: 50000
+      VOICE_REGION: ${VOICE_REGION:-default}
+      VOICE_SECRET: ${VOICE_SECRET:-dev-voice-server-secret}
+      REGISTRY_URL: api:9090
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: json
+    ports:
+      - "50000-50100:50000-50100/udp"
+      - "9091:9091"
+    restart: unless-stopped
+    networks:
+      - concord-network
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: concord-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    ports:
+      - "9092:9090"
+    networks:
+      - concord-network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: concord-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - concord-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  concord-network:
+    driver: bridge

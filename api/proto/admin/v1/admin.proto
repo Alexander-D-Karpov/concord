@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package concord.admin.v1;
+
+option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/admin/v1;adminv1";
+
+message KickRequest {
+  string room_id = 1;
+  string user_id = 2;
+}
+
+message BanRequest {
+  string room_id = 1;
+  string user_id = 2;
+  int64 duration_seconds = 3;
+}
+
+message MuteRequest {
+  string room_id = 1;
+  string user_id = 2;
+  bool muted = 3;
+}
+
+message EmptyResponse {}
+
+service AdminService {
+  rpc Kick(KickRequest) returns (EmptyResponse);
+  rpc Ban(BanRequest) returns (EmptyResponse);
+  rpc Mute(MuteRequest) returns (EmptyResponse);
+}

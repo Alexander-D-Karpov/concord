@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package concord.auth.v1;
+
+option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/auth/v1;authv1";
+
+message LoginPasswordRequest {
+  string handle = 1;
+  string password = 2;
+}
+
+message LoginOAuthRequest {
+  string provider = 1;
+  string code = 2;
+  string redirect_uri = 3;
+}
+
+message Token {
+  string access_token = 1;
+  int64 expires_in = 2;
+  string refresh_token = 3;
+  string token_type = 4;
+}
+
+message RefreshRequest {
+  string refresh_token = 1;
+}
+
+message LogoutRequest {
+  string refresh_token = 1;
+}
+
+message OAuthBeginRequest {
+  string provider = 1;
+  string redirect_uri = 2;
+}
+
+message OAuthBeginResponse {
+  string auth_url = 1;
+  string state = 2;
+}
+
+message RegisterRequest {
+  string handle = 1;
+  string password = 2;
+  string display_name = 3;
+}
+
+message EmptyResponse {}
+
+service AuthService {
+  rpc Register(RegisterRequest) returns (Token);
+  rpc LoginPassword(LoginPasswordRequest) returns (Token);
+  rpc LoginOAuth(LoginOAuthRequest) returns (Token);
+  rpc OAuthBegin(OAuthBeginRequest) returns (OAuthBeginResponse);
+  rpc Refresh(RefreshRequest) returns (Token);
+  rpc Logout(LogoutRequest) returns (EmptyResponse);
+}

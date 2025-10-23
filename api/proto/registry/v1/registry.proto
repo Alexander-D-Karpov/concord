@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package concord.registry.v1;
+
+option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/registry/v1;registryv1";
+
+import "common/v1/types.proto";
+import "google/protobuf/timestamp.proto";
+
+message RegisterServerRequest {
+  concord.common.v1.VoiceServer server = 1;
+  string jwks_url = 2;
+  string shared_secret = 3;
+}
+
+message RegisterServerResponse {
+  concord.common.v1.VoiceServer server = 1;
+}
+
+message HeartbeatRequest {
+  string server_id = 1;
+  int32 active_rooms = 2;
+  int32 active_sessions = 3;
+  double cpu = 4;
+  double outbound_mbps = 5;
+  google.protobuf.Timestamp ts = 6;
+}
+
+message ListServersRequest {
+  string region = 1;
+}
+
+message ListServersResponse {
+  repeated concord.common.v1.VoiceServer servers = 1;
+}
+
+message EmptyResponse {}
+
+service RegistryService {
+  rpc RegisterServer(RegisterServerRequest) returns (RegisterServerResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (EmptyResponse);
+  rpc ListServers(ListServersRequest) returns (ListServersResponse);
+}

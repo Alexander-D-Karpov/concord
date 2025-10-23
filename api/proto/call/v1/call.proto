@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package concord.call.v1;
+
+option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/call/v1;callv1";
+
+message JoinVoiceRequest {
+  string room_id = 1;
+  bool audio_only = 2;
+}
+
+message UdpEndpoint {
+  string host = 1;
+  uint32 port = 2;
+}
+
+message CodecHint {
+  string audio = 1;
+  string video = 2;
+}
+
+message CryptoSuite {
+  string aead = 1;
+  bytes key_id = 2;
+  bytes key_material = 3;
+  bytes nonce_base = 4;
+}
+
+message JoinVoiceResponse {
+  UdpEndpoint endpoint = 1;
+  string server_id = 2;
+  string voice_token = 3;
+  CodecHint codec = 4;
+  CryptoSuite crypto = 5;
+  repeated Participant participants = 6;
+}
+
+message Participant {
+  string user_id = 1;
+  uint32 ssrc = 2;
+  bool muted = 3;
+  bool video_enabled = 4;
+}
+
+message LeaveVoiceRequest {
+  string room_id = 1;
+}
+
+message SetMediaPrefsRequest {
+  string room_id = 1;
+  bool audio_only = 2;
+  bool video_enabled = 3;
+  bool muted = 4;
+}
+
+message EmptyResponse {}
+
+service CallService {
+  rpc JoinVoice(JoinVoiceRequest) returns (JoinVoiceResponse);
+  rpc LeaveVoice(LeaveVoiceRequest) returns (EmptyResponse);
+  rpc SetMediaPrefs(SetMediaPrefsRequest) returns (EmptyResponse);
+}

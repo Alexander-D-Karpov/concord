@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package concord.chat.v1;
+
+option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/chat/v1;chatv1";
+
+import "common/v1/types.proto";
+
+message SendMessageRequest {
+  string room_id = 1;
+  string content = 2;
+}
+
+message SendMessageResponse {
+  concord.common.v1.Message message = 1;
+}
+
+message EditMessageRequest {
+  string message_id = 1;
+  string content = 2;
+}
+
+message DeleteMessageRequest {
+  string message_id = 1;
+}
+
+message ListMessagesRequest {
+  string room_id = 1;
+  string before_id = 2;
+  string after_id = 3;
+  int32 limit = 4;
+}
+
+message ListMessagesResponse {
+  repeated concord.common.v1.Message messages = 1;
+  bool has_more = 2;
+}
+
+message SearchMessagesRequest {
+  string query = 1;
+  string room_id = 2;
+  int32 limit = 3;
+}
+
+message SearchMessagesResponse {
+  repeated concord.common.v1.Message messages = 1;
+}
+
+message EmptyResponse {}
+
+service ChatService {
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+  rpc EditMessage(EditMessageRequest) returns (concord.common.v1.Message);
+  rpc DeleteMessage(DeleteMessageRequest) returns (EmptyResponse);
+  rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
+  rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse);
+}

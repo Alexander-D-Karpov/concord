@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package concord.common.v1;
+
+option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/common/v1;commonv1";
+
+import "google/protobuf/timestamp.proto";
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_MEMBER = 1;
+  ROLE_MODERATOR = 2;
+  ROLE_ADMIN = 3;
+}
+
+message User {
+  string id = 1;
+  string handle = 2;
+  string display_name = 3;
+  string avatar_url = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message Room {
+  string id = 1;
+  string name = 2;
+  string created_by = 3;
+  string voice_server_id = 4;
+  string region = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message Member {
+  string user_id = 1;
+  string room_id = 2;
+  Role role = 3;
+  google.protobuf.Timestamp joined_at = 4;
+}
+
+message VoiceServer {
+  string id = 1;
+  string name = 2;
+  string region = 3;
+  string addr_udp = 4;
+  string addr_ctrl = 5;
+  string status = 6;
+  int32 capacity_hint = 7;
+  double load_score = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+message Message {
+  string id = 1;
+  string room_id = 2;
+  string author_id = 3;
+  string content = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp edited_at = 6;
+  bool deleted = 7;
+}
+
+message Pagination {
+  string cursor = 1;
+  int32 limit = 2;
+}

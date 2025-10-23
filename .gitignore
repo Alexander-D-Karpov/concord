@@ -1,0 +1,40 @@
+# Binaries
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+/cmd/concord-api/concord-api
+/cmd/concord-voice/concord-voice
+
+# Test binary
+*.test
+*.out
+
+# Go workspace file
+go.work
+
+# Generated files
+/api/gen/
+
+# Config
+*.env
+config.local.yaml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Database
+*.db
+*.sqlite

@@ -1,0 +1,28 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'concord-api'
+    static_configs:
+      - targets: ['api:9090']
+        labels:
+          service: 'api'
+
+  - job_name: 'concord-voice'
+    static_configs:
+      - targets: ['voice:9091']
+        labels:
+          service: 'voice'
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres:5432']
