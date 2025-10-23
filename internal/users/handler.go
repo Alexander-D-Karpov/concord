@@ -4,7 +4,7 @@ import (
 	"context"
 
 	commonv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/common/v1"
-	usersv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/user
+	usersv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/users/v1"
 	"github.com/Alexander-D-Karpov/concord/internal/common/errors"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
