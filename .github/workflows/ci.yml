@@ -291,17 +291,14 @@ jobs:
         run: |
           mkdir -p release
           
-          # Copy all binaries to release folder
           for dir in artifacts/concord-*; do
             if [ -d "$dir" ]; then
               cp "$dir"/* release/ || true
             fi
           done
           
-          # List files for debugging
           ls -la release/
           
-          # Create checksums file
           cd release
           sha256sum concord-* > checksums.txt
           cd ..
@@ -321,67 +318,42 @@ jobs:
           body: |
             ## Concord - Discord-like Voice & Chat Platform
             
-            Release includes both API and Voice server binaries.
+            Release includes both API and Voice server binaries for multiple platforms.
             
-            ### Download Instructions
+            ### API Server Downloads
             
-            #### API Server
+            - Linux (amd64): concord-api-linux-amd64
+            - Linux (arm64): concord-api-linux-arm64  
+            - macOS (Intel): concord-api-darwin-amd64
+            - macOS (Apple Silicon): concord-api-darwin-arm64
+            - Windows: concord-api-windows-amd64.exe
             
-            **Linux (amd64):**
-  ```bash
-  wget https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/concord-api-linux-amd64
-  chmod +x concord-api-linux-amd64
-  ./concord-api-linux-amd64
-  ```
-
-  **Linux (arm64):**
-  ```bash
-  wget https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/concord-api-linux-arm64
-  chmod +x concord-api-linux-arm64
-  ./concord-api-linux-arm64
-  ```
-
-  **macOS (Intel):** `concord-api-darwin-amd64`
-  **macOS (Apple Silicon):** `concord-api-darwin-arm64`
-  **Windows:** `concord-api-windows-amd64.exe`
-
-  #### Voice Server
-
-  **Linux (amd64):**
-  ```bash
-  wget https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/concord-voice-linux-amd64
-  chmod +x concord-voice-linux-amd64
-  ./concord-voice-linux-amd64
-  ```
-
-  **Linux (arm64):**
-  ```bash
-  wget https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/concord-voice-linux-arm64
-  chmod +x concord-voice-linux-arm64
-  ./concord-voice-linux-arm64
-  ```
-
-  **macOS (Intel):** `concord-voice-darwin-amd64`
-  **macOS (Apple Silicon):** `concord-voice-darwin-arm64`
-  **Windows:** `concord-voice-windows-amd64.exe`
-
-### Verify Downloads
-Check the `checksums.txt` file to verify your downloads:
-  ```bash
-  sha256sum -c checksums.txt
-  ```
-  
-  ### Configuration
-  Copy `.env.example` to `.env` and configure your environment variables before running.
-
-### Running with Docker
-Alternatively, use Docker images:
-  ```bash
-  docker pull ${{ secrets.DOCKER_USERNAME }}/concord-api:${{ github.sha }}
-  docker pull ${{ secrets.DOCKER_USERNAME }}/concord-voice:${{ github.sha }}
-  ```
-files: release/*
-draft: false
-prerelease: true
-env:
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            ### Voice Server Downloads
+            
+            - Linux (amd64): concord-voice-linux-amd64
+            - Linux (arm64): concord-voice-linux-arm64
+            - macOS (Intel): concord-voice-darwin-amd64
+            - macOS (Apple Silicon): concord-voice-darwin-arm64
+            - Windows: concord-voice-windows-amd64.exe
+            
+            ### Quick Start
+            
+            Download and run on Linux:
+            
+            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/concord-api-linux-amd64
+            chmod +x concord-api-linux-amd64
+            ./concord-api-linux-amd64
+            
+            ### Verify Downloads
+            
+            sha256sum -c checksums.txt
+            
+            ### Docker Images
+            
+            docker pull ${{ secrets.DOCKER_USERNAME }}/concord-api:${{ github.sha }}
+            docker pull ${{ secrets.DOCKER_USERNAME }}/concord-voice:${{ github.sha }}
+          files: release/*
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
