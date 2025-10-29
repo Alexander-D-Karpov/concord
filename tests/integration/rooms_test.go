@@ -7,6 +7,7 @@ import (
 
 	"github.com/Alexander-D-Karpov/concord/internal/common/config"
 	"github.com/Alexander-D-Karpov/concord/internal/infra/db"
+	"github.com/Alexander-D-Karpov/concord/internal/infra/migrations"
 	"github.com/Alexander-D-Karpov/concord/internal/rooms"
 	"github.com/Alexander-D-Karpov/concord/internal/users"
 	"github.com/google/uuid"
@@ -30,6 +31,10 @@ func setupTestDB(t *testing.T) *db.DB {
 	}
 
 	database, err := db.New(cfg)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = migrations.Run(ctx, database.Pool)
 	require.NoError(t, err)
 
 	cleanupTestData(t, database)

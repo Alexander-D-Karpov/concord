@@ -10,6 +10,7 @@ import (
 	"github.com/Alexander-D-Karpov/concord/internal/auth/jwt"
 	"github.com/Alexander-D-Karpov/concord/internal/common/config"
 	"github.com/Alexander-D-Karpov/concord/internal/infra/db"
+	"github.com/Alexander-D-Karpov/concord/internal/infra/migrations"
 	"github.com/Alexander-D-Karpov/concord/internal/users"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -27,6 +28,10 @@ func setupTestDB(t *testing.T) *db.DB {
 		MinConns: 1,
 	}
 	database, err := db.New(cfg)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = migrations.Run(ctx, database.Pool)
 	require.NoError(t, err)
 
 	cleanupTestData(t, database)
@@ -56,7 +61,6 @@ func cleanupTestData(t *testing.T, database *db.DB) {
 func uniqueHandle(base string) string {
 	return fmt.Sprintf("%s_%s", base, uuid.New().String()[:8])
 }
-
 func TestRegister(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
