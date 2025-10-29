@@ -6,7 +6,6 @@ import (
 	"time"
 
 	streamv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/stream/v1"
-	"github.com/Alexander-D-Karpov/concord/internal/common/logging"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -37,6 +36,10 @@ func NewHub(logger *zap.Logger) *Hub {
 	}
 }
 
+func (h *Hub) Logger() *zap.Logger {
+	return h.logger
+}
+
 func (h *Hub) AddClient(userID string, stream streamv1.StreamService_EventStreamServer) *Client {
 	ctx, cancel := context.WithCancel(stream.Context())
 
@@ -55,7 +58,7 @@ func (h *Hub) AddClient(userID string, stream streamv1.StreamService_EventStream
 
 	h.logger.Info("client connected", zap.String("user_id", userID))
 
-	go client.writePump()
+	go client.writePump(h.logger)
 
 	return client
 }
@@ -174,7 +177,7 @@ func (h *Hub) BroadcastToRoom(roomID string, event *streamv1.ServerEvent) {
 	}
 }
 
-func (c *Client) writePump() {
+func (c *Client) writePump(logger *zap.Logger) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -186,7 +189,7 @@ func (c *Client) writePump() {
 			}
 
 			if err := c.Stream.Send(event); err != nil {
-				logging.L().Error("failed to send event",
+				logger.Error("failed to send event",
 					zap.String("user_id", c.UserID),
 					zap.Error(err),
 				)
@@ -194,6 +197,7 @@ func (c *Client) writePump() {
 			}
 
 		case <-ticker.C:
+			// Keep-alive
 
 		case <-c.ctx.Done():
 			return

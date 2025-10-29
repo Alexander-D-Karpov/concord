@@ -55,7 +55,8 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_ENABLED: "true"
-      GRPC_PORT: 9090
+      GRPC_PORT: 9000
+      SERVER_PORT: 8080
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-in-production}
       VOICE_JWT_SECRET: ${VOICE_JWT_SECRET:-dev-voice-secret}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -63,13 +64,18 @@ services:
       RATE_LIMIT_ENABLED: "true"
       RATE_LIMIT_REQUESTS_PER_MINUTE: 60
       RATE_LIMIT_BURST: 10
+      METRICS_PORT: 9100
+      HEALTH_PORT: 8081
     ports:
-      - "9090:9090"
+      - "9000:9000"   # gRPC
+      - "8080:8080"   # HTTP Gateway
+      - "9100:9100"   # Metrics
+      - "8081:8081"   # Health
     restart: unless-stopped
     networks:
       - concord-network
     healthcheck:
-      test: ["CMD", "grpc_health_probe", "-addr=:9090"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -84,14 +90,19 @@ services:
     environment:
       VOICE_UDP_HOST: 0.0.0.0
       VOICE_UDP_PORT_START: 50000
+      VOICE_CONTROL_PORT: 9001
       VOICE_REGION: ${VOICE_REGION:-default}
       VOICE_SECRET: ${VOICE_SECRET:-dev-voice-server-secret}
-      REGISTRY_URL: api:9090
+      REGISTRY_URL: api:9000
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_FORMAT: json
+      VOICE_METRICS_PORT: 9101
+      VOICE_HEALTH_PORT: 8082
     ports:
-      - "50000-50100:50000-50100/udp"
-      - "9091:9091"
+      - "50000-50100:50000-50100/udp"  # UDP for voice
+      - "9001:9001"                     # Control
+      - "9101:9101"                     # Metrics
+      - "8082:8082"                     # Health
     restart: unless-stopped
     networks:
       - concord-network
@@ -106,7 +117,7 @@ services:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
     ports:
-      - "9092:9090"
+      - "9090:9090"
     networks:
       - concord-network
 

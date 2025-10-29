@@ -2,6 +2,9 @@ package voiceassign
 
 import (
 	"context"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Alexander-D-Karpov/concord/internal/auth/jwt"
@@ -24,6 +27,24 @@ type VoiceServer struct {
 type Service struct {
 	pool       *pgxpool.Pool
 	jwtManager *jwt.Manager
+}
+
+type Assignment struct {
+	Host         string
+	Port         uint32
+	ServerID     string
+	Token        string
+	KeyID        []byte
+	KeyMaterial  []byte
+	NonceBase    []byte
+	Participants []ParticipantInfo
+}
+
+type ParticipantInfo struct {
+	UserID       string
+	SSRC         uint32
+	Muted        bool
+	VideoEnabled bool
 }
 
 func NewService(pool *pgxpool.Pool, jwtManager *jwt.Manager) *Service {
@@ -108,4 +129,53 @@ func (s *Service) GetServerByID(ctx context.Context, serverID string) (*VoiceSer
 	}
 
 	return &server, nil
+}
+
+func (s *Service) AssignVoiceServer(ctx context.Context, userID, roomID string) (*Assignment, error) {
+	server, err := s.SelectServerForRoom(ctx, roomID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("select server: %w", err)
+	}
+
+	token, keyMaterial, err := s.IssueJoinToken(userID, roomID, server.ID.String(), 5*time.Minute)
+	if err != nil {
+		return nil, fmt.Errorf("issue token: %w", err)
+	}
+
+	keyID, err := crypto.GenerateKey()
+	if err != nil {
+		return nil, fmt.Errorf("generate key ID: %w", err)
+	}
+
+	nonceBase, err := crypto.GenerateNonceBase()
+	if err != nil {
+		return nil, fmt.Errorf("generate nonce base: %w", err)
+	}
+
+	host, portStr := parseAddr(server.AddrUDP)
+	port := uint32(0)
+	if p, err := strconv.ParseUint(portStr, 10, 32); err == nil {
+		port = uint32(p)
+	}
+
+	participants := []ParticipantInfo{}
+
+	return &Assignment{
+		Host:         host,
+		Port:         port,
+		ServerID:     server.ID.String(),
+		Token:        token,
+		KeyID:        keyID[:16],
+		KeyMaterial:  keyMaterial,
+		NonceBase:    nonceBase,
+		Participants: participants,
+	}, nil
+}
+
+func parseAddr(addr string) (string, string) {
+	parts := strings.Split(addr, ":")
+	if len(parts) != 2 {
+		return addr, "50000"
+	}
+	return parts[0], parts[1]
 }

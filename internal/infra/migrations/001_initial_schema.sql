@@ -86,3 +86,23 @@ CREATE TABLE refresh_tokens (
 
 CREATE INDEX idx_refresh_tokens_user ON refresh_tokens(user_id);
 CREATE INDEX idx_refresh_tokens_expires ON refresh_tokens(expires_at);
+
+
+CREATE TABLE IF NOT EXISTS room_bans (
+                                         room_id UUID NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+                                         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                                         banned_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                                         expires_at TIMESTAMP,
+                                         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                                         PRIMARY KEY (room_id, user_id)
+);
+
+CREATE INDEX idx_room_bans_expires ON room_bans(expires_at) WHERE expires_at IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS room_mutes (
+                                          room_id UUID NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+                                          user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                                          muted_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                                          created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                                          PRIMARY KEY (room_id, user_id)
+);

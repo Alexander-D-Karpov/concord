@@ -12,6 +12,7 @@ import (
 var (
 	ErrEncryptFailed = errors.New("encryption failed")
 	ErrDecryptFailed = errors.New("decryption failed")
+	ErrInvalidNonce  = errors.New("invalid nonce size")
 )
 
 type Cipher struct {
@@ -39,19 +40,55 @@ func GenerateKey() ([]byte, error) {
 	return key, nil
 }
 
-func (c *Cipher) Encrypt(plaintext []byte, sequence uint32, ssrc uint32) ([]byte, error) {
+func GenerateNonceBase() ([]byte, error) {
+	nonce := make([]byte, 4)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	return nonce, nil
+}
+
+func DeriveNonce(ssrc, timestamp uint32, sequence uint16) []byte {
 	nonce := make([]byte, chacha20poly1305.NonceSizeX)
-	binary.BigEndian.PutUint32(nonce[0:4], sequence)
-	binary.BigEndian.PutUint32(nonce[4:8], ssrc)
+
+	binary.BigEndian.PutUint32(nonce[0:4], ssrc)
+	binary.BigEndian.PutUint32(nonce[4:8], timestamp)
+	binary.BigEndian.PutUint16(nonce[8:10], sequence)
+
+	return nonce
+}
+
+func (c *Cipher) Encrypt(plaintext []byte, ssrc, timestamp uint32, sequence uint16) ([]byte, error) {
+	nonce := DeriveNonce(ssrc, timestamp, sequence)
 
 	ciphertext := c.aead.Seal(nil, nonce, plaintext, nil)
 	return ciphertext, nil
 }
 
-func (c *Cipher) Decrypt(ciphertext []byte, sequence uint32, ssrc uint32) ([]byte, error) {
-	nonce := make([]byte, chacha20poly1305.NonceSizeX)
-	binary.BigEndian.PutUint32(nonce[0:4], sequence)
-	binary.BigEndian.PutUint32(nonce[4:8], ssrc)
+func (c *Cipher) Decrypt(ciphertext []byte, ssrc, timestamp uint32, sequence uint16) ([]byte, error) {
+	nonce := DeriveNonce(ssrc, timestamp, sequence)
+
+	plaintext, err := c.aead.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, ErrDecryptFailed
+	}
+
+	return plaintext, nil
+}
+
+func (c *Cipher) EncryptWithNonce(plaintext []byte, nonce []byte) ([]byte, error) {
+	if len(nonce) != chacha20poly1305.NonceSizeX {
+		return nil, ErrInvalidNonce
+	}
+
+	ciphertext := c.aead.Seal(nil, nonce, plaintext, nil)
+	return ciphertext, nil
+}
+
+func (c *Cipher) DecryptWithNonce(ciphertext []byte, nonce []byte) ([]byte, error) {
+	if len(nonce) != chacha20poly1305.NonceSizeX {
+		return nil, ErrInvalidNonce
+	}
 
 	plaintext, err := c.aead.Open(nil, nonce, ciphertext, nil)
 	if err != nil {

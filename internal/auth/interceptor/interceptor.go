@@ -29,6 +29,10 @@ var publicMethods = map[string]bool{
 	"/grpc.reflection.v1.ServerReflection/ServerReflectionInfo": true,
 	"/grpc.health.v1.Health/Check":                              true,
 	"/grpc.health.v1.Health/Watch":                              true,
+
+	"/concord.registry.v1.RegistryService/RegisterServer": true,
+	"/concord.registry.v1.RegistryService/Heartbeat":      true,
+	"/concord.registry.v1.RegistryService/ListServers":    true,
 }
 
 type AuthInterceptor struct {

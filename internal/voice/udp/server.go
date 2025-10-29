@@ -74,12 +74,12 @@ func (s *Server) Start(ctx context.Context) error {
 
 	<-ctx.Done()
 	close(s.stopChan)
-	err := s.conn.Close()
-	if err != nil {
+
+	if err := s.conn.Close(); err != nil {
 		return err
 	}
-	s.wg.Wait()
 
+	s.wg.Wait()
 	s.logger.Info("UDP server stopped")
 	return nil
 }
@@ -108,35 +108,36 @@ func (s *Server) readLoop(workerID int) {
 
 		packetData := make([]byte, n)
 		copy(packetData, buf[:n])
-
 		go s.handlePacket(packetData, addr)
 	}
 }
 
 func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
-	packet, err := protocol.ParsePacket(data)
-	if err != nil {
-		s.logger.Debug("failed to parse packet", zap.Error(err))
+	if len(data) < 1 {
 		return
 	}
 
-	switch packet.Header.Type {
+	packetType := data[0]
+
+	switch packetType {
 	case protocol.PacketTypeHello:
-		s.handleHello(packet, addr)
-	case protocol.PacketTypeMedia:
-		s.handleMedia(packet, addr)
+		s.handleHello(data, addr)
+	case protocol.PacketTypeAudio, protocol.PacketTypeVideo:
+		s.handleMedia(data, addr)
 	case protocol.PacketTypePing:
-		s.handlePing(packet, addr)
+		s.handlePing(data, addr)
 	case protocol.PacketTypeBye:
-		s.handleBye(packet, addr)
+		s.handleBye(data, addr)
+	case protocol.PacketTypeSpeaking:
+		s.handleSpeaking(data, addr)
 	default:
-		s.logger.Debug("unknown packet type", zap.Uint8("type", packet.Header.Type))
+		s.logger.Debug("unknown packet type", zap.Uint8("type", packetType))
 	}
 }
 
-func (s *Server) handleHello(packet *protocol.Packet, addr *net.UDPAddr) {
+func (s *Server) handleHello(data []byte, addr *net.UDPAddr) {
 	var hello protocol.HelloPayload
-	if err := json.Unmarshal(packet.Payload, &hello); err != nil {
+	if err := json.Unmarshal(data[1:], &hello); err != nil {
 		s.logger.Error("failed to unmarshal hello", zap.Error(err))
 		return
 	}
@@ -166,7 +167,7 @@ func (s *Server) handleHello(packet *protocol.Packet, addr *net.UDPAddr) {
 	for _, existing := range existingSessions {
 		if existing.ID != sess.ID {
 			participants = append(participants, protocol.ParticipantInfo{
-				UserID:       uint32(existing.SSRC),
+				UserID:       existing.UserID,
 				SSRC:         existing.SSRC,
 				Muted:        existing.Muted,
 				VideoEnabled: existing.VideoEnabled,
@@ -186,16 +187,11 @@ func (s *Server) handleHello(packet *protocol.Packet, addr *net.UDPAddr) {
 		return
 	}
 
-	welcomePacket := &protocol.Packet{
-		Header: protocol.PacketHeader{
-			Type:   protocol.PacketTypeWelcome,
-			SSRC:   sess.SSRC,
-			RoomID: packet.Header.RoomID,
-		},
-		Payload: welcomeData,
-	}
+	packet := make([]byte, 1+len(welcomeData))
+	packet[0] = protocol.PacketTypeWelcome
+	copy(packet[1:], welcomeData)
 
-	if err := s.SendPacket(welcomePacket, addr); err != nil {
+	if err := s.send(packet, addr); err != nil {
 		s.logger.Error("failed to send welcome", zap.Error(err))
 		return
 	}
@@ -207,35 +203,70 @@ func (s *Server) handleHello(packet *protocol.Packet, addr *net.UDPAddr) {
 	)
 }
 
-func (s *Server) handleMedia(packet *protocol.Packet, addr *net.UDPAddr) {
-	if len(packet.Payload) == 0 {
+func (s *Server) handleMedia(data []byte, addr *net.UDPAddr) {
+	if len(data) < 20 {
+		return
+	}
+
+	packet, err := protocol.ParsePacket(data)
+	if err != nil {
+		s.logger.Debug("failed to parse packet", zap.Error(err))
 		return
 	}
 
 	s.router.RoutePacket(packet, addr)
 }
 
-func (s *Server) handlePing(packet *protocol.Packet, addr *net.UDPAddr) {
-	pong := &protocol.Packet{
-		Header: protocol.PacketHeader{
-			Type:      protocol.PacketTypePong,
-			Sequence:  packet.Header.Sequence,
-			Timestamp: packet.Header.Timestamp,
-			SSRC:      packet.Header.SSRC,
-		},
-	}
+func (s *Server) handlePing(data []byte, addr *net.UDPAddr) {
+	pong := make([]byte, len(data))
+	pong[0] = protocol.PacketTypePong
+	copy(pong[1:], data[1:])
 
-	if err := s.SendPacket(pong, addr); err != nil {
+	if err := s.send(pong, addr); err != nil {
 		s.logger.Error("failed to send pong", zap.Error(err))
 	}
 }
 
-func (s *Server) handleBye(packet *protocol.Packet, addr *net.UDPAddr) {
+func (s *Server) handleBye(data []byte, addr *net.UDPAddr) {
 	s.logger.Info("received bye", zap.String("addr", addr.String()))
 }
 
-func (s *Server) SendPacket(packet *protocol.Packet, addr *net.UDPAddr) error {
-	data := packet.Marshal()
+func (s *Server) handleSpeaking(data []byte, addr *net.UDPAddr) {
+	var speaking protocol.SpeakingPayload
+	if err := json.Unmarshal(data[1:], &speaking); err != nil {
+		s.logger.Error("failed to unmarshal speaking", zap.Error(err))
+		return
+	}
+
+	sess := s.sessionManager.GetSession(speaking.SSRC)
+	if sess != nil {
+		sess.SetSpeaking(speaking.Speaking)
+
+		// Broadcast to room
+		s.broadcastSpeaking(sess.RoomID, speaking)
+	}
+}
+
+func (s *Server) broadcastSpeaking(roomID string, speaking protocol.SpeakingPayload) {
+	sessions := s.sessionManager.GetRoomSessions(roomID)
+
+	payload, err := json.Marshal(speaking)
+	if err != nil {
+		return
+	}
+
+	packet := make([]byte, 1+len(payload))
+	packet[0] = protocol.PacketTypeSpeaking
+	copy(packet[1:], payload)
+
+	for _, sess := range sessions {
+		if err := s.send(packet, sess.GetAddr()); err != nil {
+			s.logger.Debug("failed to send speaking notification", zap.Error(err))
+		}
+	}
+}
+
+func (s *Server) send(data []byte, addr *net.UDPAddr) error {
 	_, err := s.conn.WriteToUDP(data, addr)
 	return err
 }

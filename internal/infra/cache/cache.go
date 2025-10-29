@@ -85,6 +85,10 @@ func (c *Cache) Expire(ctx context.Context, key string, ttl time.Duration) error
 	return c.client.Expire(ctx, key, ttl).Err()
 }
 
+func (c *Cache) Ping(ctx context.Context) error {
+	return c.client.Ping(ctx).Err()
+}
+
 func (c *Cache) Close() error {
 	return c.client.Close()
 }

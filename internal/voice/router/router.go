@@ -1,6 +1,7 @@
 package router
 
 import (
+	"fmt"
 	"net"
 	"sync"
 
@@ -30,7 +31,8 @@ func NewRouter(sessionManager *session.Manager, logger *zap.Logger) *Router {
 		stopChan:       make(chan struct{}),
 	}
 
-	for i := 0; i < 4; i++ {
+	numWorkers := 4
+	for i := 0; i < numWorkers; i++ {
 		r.wg.Add(1)
 		go r.sendWorker()
 	}
@@ -44,26 +46,61 @@ func (r *Router) Stop() {
 }
 
 func (r *Router) RoutePacket(packet *protocol.Packet, fromAddr *net.UDPAddr) {
-	roomID := intToString(packet.Header.RoomID)
+	roomID := extractRoomID(packet.RoomID)
+	if roomID == "" {
+		r.logger.Debug("packet missing room ID")
+		return
+	}
 
 	sessions := r.sessionManager.GetRoomSessions(roomID)
+	if len(sessions) == 0 {
+		return
+	}
 
-	for _, session := range sessions {
-		if session.Addr.String() == fromAddr.String() {
+	switch packet.Type {
+	case protocol.PacketTypeAudio, protocol.PacketTypeVideo:
+		r.routeMediaPacket(packet, fromAddr, sessions)
+	case protocol.PacketTypeSpeaking:
+		r.routeSpeakingPacket(packet, fromAddr, sessions)
+	}
+}
+
+func (r *Router) routeMediaPacket(packet *protocol.Packet, fromAddr *net.UDPAddr, sessions []*session.Session) {
+	for _, sess := range sessions {
+		if sess.Addr.String() == fromAddr.String() {
 			continue
 		}
 
-		if session.Muted && packet.Header.Type == protocol.PacketTypeMedia {
+		if sess.Muted && packet.Type == protocol.PacketTypeAudio {
 			continue
 		}
 
 		select {
 		case r.sendQueue <- &sendTask{
 			packet: packet,
-			addr:   session.GetAddr(),
+			addr:   sess.GetAddr(),
 		}:
 		default:
-			r.logger.Warn("send queue full, dropping packet")
+			r.logger.Warn("send queue full, dropping packet",
+				zap.Uint32("ssrc", sess.SSRC),
+			)
+		}
+	}
+}
+
+func (r *Router) routeSpeakingPacket(packet *protocol.Packet, fromAddr *net.UDPAddr, sessions []*session.Session) {
+	for _, sess := range sessions {
+		if sess.Addr.String() == fromAddr.String() {
+			continue
+		}
+
+		select {
+		case r.sendQueue <- &sendTask{
+			packet: packet,
+			addr:   sess.GetAddr(),
+		}:
+		default:
+			r.logger.Warn("send queue full, dropping speaking packet")
 		}
 	}
 }
@@ -74,14 +111,40 @@ func (r *Router) sendWorker() {
 	for {
 		select {
 		case task := <-r.sendQueue:
-			r.logger.Debug("routing packet would happen here")
-			_ = task
+			r.logger.Debug("routing packet",
+				zap.Uint8("type", task.packet.Type),
+				zap.Uint32("ssrc", task.packet.SSRC),
+				zap.String("to", task.addr.String()),
+			)
+
 		case <-r.stopChan:
 			return
 		}
 	}
 }
 
-func intToString(val uint32) string {
-	return string(rune(val))
+func extractRoomID(roomIDBytes []byte) string {
+	if len(roomIDBytes) == 0 {
+		return ""
+	}
+
+	if len(roomIDBytes) == 16 {
+		return uuidBytesToString(roomIDBytes)
+	}
+
+	return string(roomIDBytes)
+}
+
+func uuidBytesToString(b []byte) string {
+	if len(b) != 16 {
+		return ""
+	}
+
+	return fmt.Sprintf("%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+		b[0], b[1], b[2], b[3],
+		b[4], b[5],
+		b[6], b[7],
+		b[8], b[9],
+		b[10], b[11], b[12], b[13], b[14], b[15],
+	)
 }

@@ -7,18 +7,18 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/reflection"
-	"google.golang.org/grpc/status"
 
 	authv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/auth/v1"
 	callv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/call/v1"
 	chatv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/chat/v1"
 	membershipv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/membership/v1"
+	registryv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/registry/v1"
 	roomsv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/rooms/v1"
 	streamv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/stream/v1"
 	usersv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/users/v1"
@@ -31,18 +31,24 @@ import (
 	"github.com/Alexander-D-Karpov/concord/internal/common/config"
 	"github.com/Alexander-D-Karpov/concord/internal/common/logging"
 	"github.com/Alexander-D-Karpov/concord/internal/events"
+	"github.com/Alexander-D-Karpov/concord/internal/gateway"
 	"github.com/Alexander-D-Karpov/concord/internal/infra"
 	"github.com/Alexander-D-Karpov/concord/internal/infra/cache"
 	"github.com/Alexander-D-Karpov/concord/internal/infra/db"
 	"github.com/Alexander-D-Karpov/concord/internal/infra/migrations"
 	"github.com/Alexander-D-Karpov/concord/internal/membership"
 	"github.com/Alexander-D-Karpov/concord/internal/messages"
+	"github.com/Alexander-D-Karpov/concord/internal/middleware"
+	"github.com/Alexander-D-Karpov/concord/internal/observability"
 	"github.com/Alexander-D-Karpov/concord/internal/ratelimit"
+	"github.com/Alexander-D-Karpov/concord/internal/registry"
 	"github.com/Alexander-D-Karpov/concord/internal/rooms"
 	"github.com/Alexander-D-Karpov/concord/internal/stream"
 	"github.com/Alexander-D-Karpov/concord/internal/users"
 	"github.com/Alexander-D-Karpov/concord/internal/voiceassign"
 )
+
+const version = "0.1.0"
 
 func main() {
 	if err := run(); err != nil {
@@ -74,7 +80,7 @@ func run() error {
 	}()
 
 	logger.Info("starting concord-api",
-		zap.String("version", "0.1.0"),
+		zap.String("version", version),
 		zap.Int("grpc_port", cfg.Server.GRPCPort),
 	)
 
@@ -87,10 +93,10 @@ func run() error {
 	logger.Info("connected to database")
 
 	ctx := context.Background()
+
 	if err := migrations.Run(ctx, database.Pool); err != nil {
 		return fmt.Errorf("run migrations: %w", err)
 	}
-
 	logger.Info("migrations applied successfully")
 
 	var cacheClient *cache.Cache
@@ -104,14 +110,32 @@ func run() error {
 		if err != nil {
 			logger.Warn("failed to connect to Redis, continuing without cache", zap.Error(err))
 		} else {
-			defer func(cacheClient *cache.Cache) {
-				err := cacheClient.Close()
-				if err != nil {
-					logger.Error("failed to close Redis client", zap.Error(err))
+			defer func() {
+				if err := cacheClient.Close(); err != nil {
+					logger.Error("failed to close cache", zap.Error(err))
 				}
-			}(cacheClient)
+			}()
 			logger.Info("connected to Redis")
 		}
+	}
+
+	metrics := observability.NewMetrics(logger)
+	healthChecker := observability.NewHealthChecker(logger, version)
+
+	healthChecker.RegisterCheck("database", func(ctx context.Context) (observability.HealthStatus, string, error) {
+		if err := database.Health(ctx); err != nil {
+			return observability.StatusUnhealthy, "database connection failed", err
+		}
+		return observability.StatusHealthy, "database connection ok", nil
+	})
+
+	if cacheClient != nil {
+		healthChecker.RegisterCheck("redis", func(ctx context.Context) (observability.HealthStatus, string, error) {
+			if err := cacheClient.Ping(ctx); err != nil {
+				return observability.StatusDegraded, "redis connection failed", err
+			}
+			return observability.StatusHealthy, "redis connection ok", nil
+		})
 	}
 
 	jwtManager := jwt.NewManager(cfg.Auth.JWTSecret, cfg.Auth.VoiceJWTSecret)
@@ -132,7 +156,6 @@ func run() error {
 	rateLimitInterceptor := ratelimit.NewInterceptor(rateLimiter)
 
 	snowflakeGen := infra.NewSnowflakeGenerator(1)
-
 	usersRepo := users.NewRepository(database.Pool)
 	usersService := users.NewService(usersRepo)
 	usersHandler := users.NewHandler(usersService)
@@ -143,7 +166,6 @@ func run() error {
 
 	messagesRepo := messages.NewRepository(database.Pool, snowflakeGen)
 	eventsHub := events.NewHub(logger)
-
 	chatService := chat.NewService(messagesRepo, eventsHub)
 	chatHandler := chat.NewHandler(chatService)
 
@@ -171,13 +193,21 @@ func run() error {
 	)
 	authHandler := authsvc.NewHandler(authService)
 
+	registryService := registry.NewService(database.Pool, logger)
+	registryHandler := registry.NewHandler(registryService)
+
 	interceptors := []grpc.UnaryServerInterceptor{
-		loggingInterceptor(logger),
+		middleware.RecoveryInterceptor(logger),
+		observability.RequestIDInterceptor(logger),
+		metrics.UnaryServerInterceptor(),
+		middleware.TimeoutInterceptor(30 * time.Second),
 		rateLimitInterceptor.Unary(),
 		authInterceptor.Unary(),
 	}
 
 	streamInterceptors := []grpc.StreamServerInterceptor{
+		middleware.StreamRecoveryInterceptor(logger),
+		metrics.StreamServerInterceptor(),
 		rateLimitInterceptor.Stream(),
 		authInterceptor.Stream(),
 	}
@@ -185,6 +215,8 @@ func run() error {
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(interceptors...),
 		grpc.ChainStreamInterceptor(streamInterceptors...),
+		grpc.MaxRecvMsgSize(16*1024*1024),
+		grpc.MaxSendMsgSize(16*1024*1024),
 	)
 
 	authv1.RegisterAuthServiceServer(grpcServer, authHandler)
@@ -194,7 +226,7 @@ func run() error {
 	membershipv1.RegisterMembershipServiceServer(grpcServer, membershipHandler)
 	streamv1.RegisterStreamServiceServer(grpcServer, streamHandler)
 	callv1.RegisterCallServiceServer(grpcServer, callHandler)
-
+	registryv1.RegisterRegistryServiceServer(grpcServer, registryHandler)
 	reflection.Register(grpcServer)
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Server.GRPCPort))
@@ -204,10 +236,33 @@ func run() error {
 
 	logger.Info("gRPC server listening", zap.String("address", listener.Addr().String()))
 
-	errChan := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errChan := make(chan error, 4)
+
 	go func() {
 		if err := grpcServer.Serve(listener); err != nil {
 			errChan <- fmt.Errorf("serve grpc: %w", err)
+		}
+	}()
+
+	go func() {
+		if err := metrics.Start(ctx, 9100); err != nil {
+			errChan <- fmt.Errorf("metrics server: %w", err)
+		}
+	}()
+
+	go func() {
+		if err := healthChecker.Start(ctx, 8081); err != nil {
+			errChan <- fmt.Errorf("health server: %w", err)
+		}
+	}()
+
+	httpGateway := gateway.New(fmt.Sprintf("localhost:%d", cfg.Server.GRPCPort), logger)
+	go func() {
+		if err := httpGateway.Start(ctx, 8080); err != nil {
+			errChan <- fmt.Errorf("http gateway: %w", err)
 		}
 	}()
 
@@ -222,64 +277,9 @@ func run() error {
 	}
 
 	logger.Info("shutting down gracefully...")
+	cancel()
 	grpcServer.GracefulStop()
-
 	logger.Info("shutdown complete")
+
 	return nil
-}
-
-func loggingInterceptor(logger *zap.Logger) grpc.UnaryServerInterceptor {
-	return func(
-		ctx context.Context,
-		req interface{},
-		info *grpc.UnaryServerInfo,
-		handler grpc.UnaryHandler,
-	) (interface{}, error) {
-		ctx = logging.WithLogger(ctx, logger)
-
-		resp, err := handler(ctx, req)
-
-		if err != nil {
-			st, ok := status.FromError(err)
-			if !ok {
-				logger.Error("request failed with non-status error",
-					zap.String("method", info.FullMethod),
-					zap.Error(err),
-				)
-				return resp, err
-			}
-
-			code := st.Code()
-
-			switch code {
-			case codes.Unauthenticated, codes.PermissionDenied:
-				logger.Debug("authentication/authorization failed",
-					zap.String("method", info.FullMethod),
-					zap.String("code", code.String()),
-					zap.String("message", st.Message()),
-				)
-			case codes.InvalidArgument, codes.NotFound, codes.AlreadyExists:
-				logger.Info("client error",
-					zap.String("method", info.FullMethod),
-					zap.String("code", code.String()),
-					zap.String("message", st.Message()),
-				)
-			case codes.Internal, codes.Unknown, codes.DataLoss:
-				logger.Error("internal server error",
-					zap.String("method", info.FullMethod),
-					zap.String("code", code.String()),
-					zap.String("message", st.Message()),
-					zap.Error(err),
-				)
-			default:
-				logger.Warn("request failed",
-					zap.String("method", info.FullMethod),
-					zap.String("code", code.String()),
-					zap.String("message", st.Message()),
-				)
-			}
-		}
-
-		return resp, err
-	}
 }
