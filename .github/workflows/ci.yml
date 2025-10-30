@@ -131,7 +131,7 @@ jobs:
           REDIS_PORT: 6379
 
       - name: Generate coverage report
-        run: go test -coverprofile=coverage.out ./...
+        run: go test -covermode=atomic -coverprofile=coverage.out ./tests/...
         env:
           DB_HOST: localhost
           DB_PORT: 5432
