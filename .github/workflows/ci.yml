@@ -130,26 +130,6 @@ jobs:
           REDIS_HOST: localhost
           REDIS_PORT: 6379
 
-      - name: Generate coverage report
-        run: go test -covermode=atomic -coverprofile=coverage.out ./tests/...
-        env:
-          DB_HOST: localhost
-          DB_PORT: 5432
-          DB_USER: postgres
-          DB_PASSWORD: postgres
-          DB_NAME: concord_test
-          REDIS_HOST: localhost
-          REDIS_PORT: 6379
-          GOEXPERIMENT: nocoverageredesign
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
-        with:
-          files: ./coverage.out
-          flags: unittests
-          name: codecov-umbrella
-          fail_ci_if_error: false
-
   build:
     name: Build
     runs-on: ubuntu-latest
