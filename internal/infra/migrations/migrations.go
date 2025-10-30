@@ -4,10 +4,10 @@ import (
 	"context"
 	"embed"
 	"fmt"
-	"github.com/jackc/pgx/v5"
 	"sort"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -33,6 +33,10 @@ func Run(ctx context.Context, pool *pgxpool.Pool) error {
 	migrationsToApply, err := getMigrationsToApply(appliedVersions)
 	if err != nil {
 		return fmt.Errorf("get migrations to apply: %w", err)
+	}
+
+	if len(migrationsToApply) == 0 {
+		return nil
 	}
 
 	for _, migration := range migrationsToApply {
@@ -99,7 +103,7 @@ func getMigrationsToApply(appliedVersions map[int]bool) ([]Migration, error) {
 
 		content, err := migrations.ReadFile(entry.Name())
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read migration file %s: %w", entry.Name(), err)
 		}
 
 		toApply = append(toApply, Migration{
@@ -122,22 +126,23 @@ func applyMigration(ctx context.Context, pool *pgxpool.Pool, migration Migration
 		return err
 	}
 	defer func(tx pgx.Tx, ctx context.Context) {
-		err := tx.Rollback(ctx)
-		if err != nil {
-			return
-		}
+		_ = tx.Rollback(ctx)
 	}(tx, ctx)
 
 	if _, err := tx.Exec(ctx, migration.SQL); err != nil {
-		return err
+		return fmt.Errorf("execute migration SQL: %w", err)
 	}
 
 	if _, err := tx.Exec(ctx,
 		"INSERT INTO schema_migrations (version, name) VALUES ($1, $2)",
 		migration.Version, migration.Name,
 	); err != nil {
-		return err
+		return fmt.Errorf("record migration: %w", err)
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit migration: %w", err)
+	}
+
+	return nil
 }

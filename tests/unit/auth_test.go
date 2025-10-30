@@ -38,6 +38,18 @@ func setupTestDB(t *testing.T) *db.DB {
 	err = migrations.Run(ctx, database.Pool)
 	require.NoError(t, err, "Failed to run migrations")
 
+	// Verify tables were created
+	var tableExists bool
+	err = database.Pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT FROM information_schema.tables 
+			WHERE table_schema = 'public' 
+			AND table_name = 'users'
+		)
+	`).Scan(&tableExists)
+	require.NoError(t, err)
+	require.True(t, tableExists, "Users table was not created by migrations")
+
 	cleanupTestData(t, database)
 
 	return database
@@ -61,7 +73,8 @@ func cleanupTestData(t *testing.T, database *db.DB) {
 		query := fmt.Sprintf("TRUNCATE TABLE %s CASCADE", table)
 		_, err := database.Pool.Exec(ctx, query)
 		if err != nil {
-			t.Logf("Warning: failed to truncate table %s: %v", table, err)
+			// Only log, don't fail - table might not exist yet
+			t.Logf("Could not truncate table %s: %v", table, err)
 		}
 	}
 }
