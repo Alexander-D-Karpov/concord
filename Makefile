@@ -14,7 +14,17 @@ clean:
 
 test-cleanup:
 	@echo "Cleaning test database..."
-	@PGPASSWORD=postgres psql -h localhost -U postgres -d concord_test -c "TRUNCATE users, rooms, memberships, messages, refresh_tokens, voice_servers CASCADE;" 2>/dev/null || true
+	@PGPASSWORD=postgres psql -h localhost -U postgres -d concord_test -c "\
+		DROP TABLE IF EXISTS refresh_tokens CASCADE; \
+		DROP TABLE IF EXISTS messages CASCADE; \
+		DROP TABLE IF EXISTS memberships CASCADE; \
+		DROP TABLE IF EXISTS rooms CASCADE; \
+		DROP TABLE IF EXISTS voice_servers CASCADE; \
+		DROP TABLE IF EXISTS users CASCADE; \
+		DROP TABLE IF EXISTS room_bans CASCADE; \
+		DROP TABLE IF EXISTS room_mutes CASCADE; \
+		DROP TABLE IF EXISTS schema_migrations CASCADE; \
+	" 2>/dev/null || true
 
 test: test-cleanup
 	@go test -v -race ./...

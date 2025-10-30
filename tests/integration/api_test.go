@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -46,20 +47,20 @@ func setupAPITestDB(t *testing.T) *db.DB {
 func cleanupAPITestData(t *testing.T, database *db.DB) {
 	ctx := context.Background()
 
-	_, err := database.Pool.Exec(ctx, "DELETE FROM refresh_tokens")
-	require.NoError(t, err)
+	tables := []string{
+		"refresh_tokens",
+		"messages",
+		"memberships",
+		"room_bans",
+		"room_mutes",
+		"rooms",
+		"users",
+		"voice_servers",
+	}
 
-	_, err = database.Pool.Exec(ctx, "DELETE FROM messages")
-	require.NoError(t, err)
-
-	_, err = database.Pool.Exec(ctx, "DELETE FROM memberships")
-	require.NoError(t, err)
-
-	_, err = database.Pool.Exec(ctx, "DELETE FROM rooms")
-	require.NoError(t, err)
-
-	_, err = database.Pool.Exec(ctx, "DELETE FROM users")
-	require.NoError(t, err)
+	for _, table := range tables {
+		_, _ = database.Pool.Exec(ctx, fmt.Sprintf("DELETE FROM %s", table))
+	}
 }
 
 func TestAuthAPI(t *testing.T) {
