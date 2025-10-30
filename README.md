@@ -1,6 +1,6 @@
 # Concord - Discord-like Voice & Chat Platform
 
-A high-performance, production-ready voice and chat platform built with Go, featuring real-time messaging, voice communication, and comprehensive administrative controls.
+A high-performance, production-ready voice and chat platform built with Go, featuring real-time messaging and voice&video communication.
 
 ## Features
 
@@ -21,8 +21,6 @@ A high-performance, production-ready voice and chat platform built with Go, feat
 - **SFU-style** media forwarding
 - **Comprehensive logging** with structured output
 - **Metrics & Observability** with Prometheus
-- **Docker support** with docker-compose
-- **CI/CD** with GitHub Actions
 
 ## Architecture
 
