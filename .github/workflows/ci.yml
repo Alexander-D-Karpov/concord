@@ -140,6 +140,7 @@ jobs:
           DB_NAME: concord_test
           REDIS_HOST: localhost
           REDIS_PORT: 6379
+          GOEXPERIMENT: nocoverageredesign
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
