@@ -23,13 +23,15 @@ import (
 
 func setupAPITestDB(t *testing.T) *db.DB {
 	cfg := config.DatabaseConfig{
-		Host:     "localhost",
-		Port:     5432,
-		User:     "postgres",
-		Password: "postgres",
-		Database: "concord_test",
-		MaxConns: 5,
-		MinConns: 1,
+		Host:            "localhost",
+		Port:            5432,
+		User:            "postgres",
+		Password:        "postgres",
+		Database:        "concord_test",
+		MaxConns:        5,
+		MinConns:        1,
+		MaxConnLifetime: 5 * time.Minute,
+		MaxConnIdleTime: 5 * time.Minute,
 	}
 
 	database, err := db.New(cfg)
@@ -37,7 +39,7 @@ func setupAPITestDB(t *testing.T) *db.DB {
 
 	ctx := context.Background()
 	err = migrations.Run(ctx, database.Pool)
-	require.NoError(t, err)
+	require.NoError(t, err, "Failed to run migrations")
 
 	cleanupAPITestData(t, database)
 
@@ -54,12 +56,16 @@ func cleanupAPITestData(t *testing.T, database *db.DB) {
 		"room_bans",
 		"room_mutes",
 		"rooms",
-		"users",
 		"voice_servers",
+		"users",
 	}
 
 	for _, table := range tables {
-		_, _ = database.Pool.Exec(ctx, fmt.Sprintf("DELETE FROM %s", table))
+		query := fmt.Sprintf("TRUNCATE TABLE %s CASCADE", table)
+		_, err := database.Pool.Exec(ctx, query)
+		if err != nil {
+			t.Logf("Warning: failed to truncate table %s: %v", table, err)
+		}
 	}
 }
 
