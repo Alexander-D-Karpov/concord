@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 
@@ -35,14 +36,19 @@ func Run(ctx context.Context, pool *pgxpool.Pool) error {
 		return fmt.Errorf("get migrations to apply: %w", err)
 	}
 
+	log.Printf("Found %d migrations to apply", len(migrationsToApply))
+
 	if len(migrationsToApply) == 0 {
+		log.Printf("No migrations to apply. Applied versions: %v", appliedVersions)
 		return nil
 	}
 
 	for _, migration := range migrationsToApply {
+		log.Printf("Applying migration %d: %s", migration.Version, migration.Name)
 		if err := applyMigration(ctx, pool, migration); err != nil {
 			return fmt.Errorf("apply migration %d: %w", migration.Version, err)
 		}
+		log.Printf("Successfully applied migration %d", migration.Version)
 	}
 
 	return nil
@@ -81,23 +87,29 @@ func getAppliedVersions(ctx context.Context, pool *pgxpool.Pool) (map[int]bool, 
 func getMigrationsToApply(appliedVersions map[int]bool) ([]Migration, error) {
 	entries, err := migrations.ReadDir(".")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read migrations directory: %w", err)
 	}
+
+	log.Printf("Found %d files in migrations directory", len(entries))
 
 	var toApply []Migration
 	for _, entry := range entries {
+		log.Printf("Processing file: %s (isDir: %v)", entry.Name(), entry.IsDir())
+
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
 			continue
 		}
 
 		var version int
 		var name string
-		_, err := fmt.Sscanf(entry.Name(), "%d_%s.sql", &version, &name)
-		if err != nil {
+		n, err := fmt.Sscanf(entry.Name(), "%d_%s.sql", &version, &name)
+		if err != nil || n != 2 {
+			log.Printf("Skipping file %s: failed to parse (scanned %d fields, err: %v)", entry.Name(), n, err)
 			continue
 		}
 
 		if appliedVersions[version] {
+			log.Printf("Migration %d already applied, skipping", version)
 			continue
 		}
 
@@ -105,6 +117,8 @@ func getMigrationsToApply(appliedVersions map[int]bool) ([]Migration, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read migration file %s: %w", entry.Name(), err)
 		}
+
+		log.Printf("Added migration %d (%s) to queue, SQL length: %d", version, name, len(content))
 
 		toApply = append(toApply, Migration{
 			Version: version,
@@ -123,11 +137,13 @@ func getMigrationsToApply(appliedVersions map[int]bool) ([]Migration, error) {
 func applyMigration(ctx context.Context, pool *pgxpool.Pool, migration Migration) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("begin transaction: %w", err)
 	}
 	defer func(tx pgx.Tx, ctx context.Context) {
 		_ = tx.Rollback(ctx)
 	}(tx, ctx)
+
+	log.Printf("Executing migration SQL (length: %d bytes)", len(migration.SQL))
 
 	if _, err := tx.Exec(ctx, migration.SQL); err != nil {
 		return fmt.Errorf("execute migration SQL: %w", err)
