@@ -2,90 +2,25 @@ package auth_test
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
 	"github.com/Alexander-D-Karpov/concord/internal/auth"
 	"github.com/Alexander-D-Karpov/concord/internal/auth/jwt"
 	"github.com/Alexander-D-Karpov/concord/internal/common/config"
-	"github.com/Alexander-D-Karpov/concord/internal/infra/db"
-	"github.com/Alexander-D-Karpov/concord/internal/infra/migrations"
 	"github.com/Alexander-D-Karpov/concord/internal/users"
+	"github.com/Alexander-D-Karpov/concord/tests/testutil"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func setupTestDB(t *testing.T) *db.DB {
-	cfg := config.DatabaseConfig{
-		Host:            "localhost",
-		Port:            5432,
-		User:            "postgres",
-		Password:        "postgres",
-		Database:        "concord_test",
-		MaxConns:        5,
-		MinConns:        1,
-		MaxConnLifetime: 5 * time.Minute,
-		MaxConnIdleTime: 5 * time.Minute,
-	}
-
-	database, err := db.New(cfg)
-	require.NoError(t, err)
-
-	ctx := context.Background()
-
-	err = migrations.Run(ctx, database.Pool)
-	require.NoError(t, err, "Failed to run migrations")
-
-	// Verify tables were created
-	var tableExists bool
-	err = database.Pool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT FROM information_schema.tables 
-			WHERE table_schema = 'public' 
-			AND table_name = 'users'
-		)
-	`).Scan(&tableExists)
-	require.NoError(t, err)
-	require.True(t, tableExists, "Users table was not created by migrations")
-
-	cleanupTestData(t, database)
-
-	return database
-}
-
-func cleanupTestData(t *testing.T, database *db.DB) {
-	ctx := context.Background()
-
-	tables := []string{
-		"refresh_tokens",
-		"messages",
-		"memberships",
-		"room_bans",
-		"room_mutes",
-		"rooms",
-		"voice_servers",
-		"users",
-	}
-
-	for _, table := range tables {
-		query := fmt.Sprintf("TRUNCATE TABLE %s CASCADE", table)
-		_, err := database.Pool.Exec(ctx, query)
-		if err != nil {
-			// Only log, don't fail - table might not exist yet
-			t.Logf("Could not truncate table %s: %v", table, err)
-		}
-	}
-}
-
 func uniqueHandle(base string) string {
-	return fmt.Sprintf("%s_%s", base, uuid.New().String()[:8])
+	return base + "_" + uuid.New().String()[:8]
 }
 
 func TestRegister(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
+	database := testutil.GetDB(t)
 
 	usersRepo := users.NewRepository(database.Pool)
 	jwtManager := jwt.NewManager("test-secret", "test-voice-secret")
@@ -103,27 +38,9 @@ func TestRegister(t *testing.T) {
 		displayName string
 		wantErr     bool
 	}{
-		{
-			name:        "valid registration",
-			handle:      uniqueHandle("testuser"),
-			password:    "password123",
-			displayName: "Test User",
-			wantErr:     false,
-		},
-		{
-			name:        "short handle",
-			handle:      "ab",
-			password:    "password123",
-			displayName: "Test",
-			wantErr:     true,
-		},
-		{
-			name:        "short password",
-			handle:      uniqueHandle("testuser2"),
-			password:    "12345",
-			displayName: "Test",
-			wantErr:     true,
-		},
+		{"valid registration", uniqueHandle("testuser"), "password123", "Test User", false},
+		{"short handle", "ab", "password123", "Test", true},
+		{"short password", uniqueHandle("testuser2"), "12345", "Test", true},
 	}
 
 	for _, tt := range tests {
@@ -142,8 +59,7 @@ func TestRegister(t *testing.T) {
 }
 
 func TestLoginPassword(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
+	database := testutil.GetDB(t)
 
 	usersRepo := users.NewRepository(database.Pool)
 	jwtManager := jwt.NewManager("test-secret", "test-voice-secret")
@@ -165,24 +81,9 @@ func TestLoginPassword(t *testing.T) {
 		password string
 		wantErr  bool
 	}{
-		{
-			name:     "valid login",
-			handle:   testHandle,
-			password: "password123",
-			wantErr:  false,
-		},
-		{
-			name:     "wrong password",
-			handle:   testHandle,
-			password: "wrongpassword",
-			wantErr:  true,
-		},
-		{
-			name:     "nonexistent user",
-			handle:   uniqueHandle("doesnotexist"),
-			password: "password123",
-			wantErr:  true,
-		},
+		{"valid login", testHandle, "password123", false},
+		{"wrong password", testHandle, "wrongpassword", true},
+		{"nonexistent user", uniqueHandle("doesnotexist"), "password123", true},
 	}
 
 	for _, tt := range tests {
@@ -200,8 +101,7 @@ func TestLoginPassword(t *testing.T) {
 }
 
 func TestRefreshToken(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
+	database := testutil.GetDB(t)
 
 	usersRepo := users.NewRepository(database.Pool)
 	jwtManager := jwt.NewManager("test-secret", "test-voice-secret")

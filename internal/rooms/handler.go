@@ -35,7 +35,7 @@ func (h *Handler) CreateRoom(ctx context.Context, req *roomsv1.CreateRoomRequest
 		region = &req.Region
 	}
 
-	room, err := h.service.CreateRoom(ctx, req.Name, voiceServerID, region)
+	room, err := h.service.CreateRoom(ctx, req.Name, voiceServerID, region, req.Description, req.IsPrivate)
 	if err != nil {
 		return nil, errors.ToGRPCError(err)
 	}
@@ -54,6 +54,31 @@ func (h *Handler) GetRoom(ctx context.Context, req *roomsv1.GetRoomRequest) (*co
 	}
 
 	return toProtoRoom(room), nil
+}
+
+func (h *Handler) UpdateRoom(ctx context.Context, req *roomsv1.UpdateRoomRequest) (*commonv1.Room, error) {
+	if req.RoomId == "" {
+		return nil, errors.ToGRPCError(errors.BadRequest("room_id is required"))
+	}
+
+	room, err := h.service.UpdateRoom(ctx, req.RoomId, req.Name, req.Description, req.IsPrivate)
+	if err != nil {
+		return nil, errors.ToGRPCError(err)
+	}
+
+	return toProtoRoom(room), nil
+}
+
+func (h *Handler) DeleteRoom(ctx context.Context, req *roomsv1.DeleteRoomRequest) (*roomsv1.EmptyResponse, error) {
+	if req.RoomId == "" {
+		return nil, errors.ToGRPCError(errors.BadRequest("room_id is required"))
+	}
+
+	if err := h.service.DeleteRoom(ctx, req.RoomId); err != nil {
+		return nil, errors.ToGRPCError(err)
+	}
+
+	return &roomsv1.EmptyResponse{}, nil
 }
 
 func (h *Handler) ListRoomsForUser(ctx context.Context, req *roomsv1.ListRoomsForUserRequest) (*roomsv1.ListRoomsForUserResponse, error) {
@@ -88,16 +113,13 @@ func (h *Handler) AttachVoiceServer(ctx context.Context, req *roomsv1.AttachVoic
 	return toProtoRoom(room), nil
 }
 
-func (h *Handler) DeleteRoom(ctx context.Context, req *roomsv1.DeleteRoomRequest) (*roomsv1.EmptyResponse, error) {
-	return &roomsv1.EmptyResponse{}, nil
-}
-
 func toProtoRoom(room *Room) *commonv1.Room {
 	protoRoom := &commonv1.Room{
 		Id:        room.ID.String(),
 		Name:      room.Name,
 		CreatedBy: room.CreatedBy.String(),
 		CreatedAt: timestamppb.New(room.CreatedAt),
+		IsPrivate: room.IsPrivate,
 	}
 
 	if room.VoiceServerID != nil {
@@ -106,6 +128,10 @@ func toProtoRoom(room *Room) *commonv1.Room {
 
 	if room.Region != nil {
 		protoRoom.Region = *room.Region
+	}
+
+	if room.Description != nil {
+		protoRoom.Description = *room.Description
 	}
 
 	return protoRoom

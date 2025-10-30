@@ -7,6 +7,7 @@ import (
 
 	streamv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/stream/v1"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -16,6 +17,7 @@ type Hub struct {
 	clients map[string]*Client
 	rooms   map[string]map[string]bool
 	logger  *zap.Logger
+	pool    *pgxpool.Pool
 }
 
 type Client struct {
@@ -28,11 +30,12 @@ type Client struct {
 	cancel   context.CancelFunc
 }
 
-func NewHub(logger *zap.Logger) *Hub {
+func NewHub(logger *zap.Logger, pool *pgxpool.Pool) *Hub {
 	return &Hub{
 		clients: make(map[string]*Client),
 		rooms:   make(map[string]map[string]bool),
 		logger:  logger,
+		pool:    pool,
 	}
 }
 
@@ -60,7 +63,39 @@ func (h *Hub) AddClient(userID string, stream streamv1.StreamService_EventStream
 
 	go client.writePump(h.logger)
 
+	userUUID, err := uuid.Parse(userID)
+	if err == nil {
+		h.autoSubscribeUserRooms(ctx, client, userUUID)
+	}
+
 	return client
+}
+
+func (h *Hub) autoSubscribeUserRooms(ctx context.Context, client *Client, userID uuid.UUID) {
+	query := `
+		SELECT room_id FROM memberships WHERE user_id = $1
+	`
+
+	rows, err := h.pool.Query(ctx, query, userID)
+	if err != nil {
+		h.logger.Error("failed to query user rooms", zap.Error(err))
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var roomID uuid.UUID
+		if err := rows.Scan(&roomID); err != nil {
+			continue
+		}
+
+		roomIDStr := roomID.String()
+		h.Subscribe(client.UserID, roomIDStr)
+		h.logger.Debug("auto-subscribed to room",
+			zap.String("user_id", client.UserID),
+			zap.String("room_id", roomIDStr),
+		)
+	}
 }
 
 func (h *Hub) RemoveClient(userID string) {
@@ -138,6 +173,34 @@ func (h *Hub) Unsubscribe(userID, roomID string) {
 	)
 }
 
+func (h *Hub) NotifyRoomJoin(userID, roomID string) {
+	h.mu.RLock()
+	_, exists := h.clients[userID]
+	h.mu.RUnlock()
+
+	if exists {
+		h.Subscribe(userID, roomID)
+		h.logger.Info("user joined room, subscribed to stream",
+			zap.String("user_id", userID),
+			zap.String("room_id", roomID),
+		)
+	}
+}
+
+func (h *Hub) NotifyRoomLeave(userID, roomID string) {
+	h.mu.RLock()
+	_, exists := h.clients[userID]
+	h.mu.RUnlock()
+
+	if exists {
+		h.Unsubscribe(userID, roomID)
+		h.logger.Info("user left room, unsubscribed from stream",
+			zap.String("user_id", userID),
+			zap.String("room_id", roomID),
+		)
+	}
+}
+
 func (h *Hub) BroadcastToRoom(roomID string, event *streamv1.ServerEvent) {
 	h.mu.RLock()
 	users, exists := h.rooms[roomID]
@@ -197,7 +260,6 @@ func (c *Client) writePump(logger *zap.Logger) {
 			}
 
 		case <-ticker.C:
-			// Keep-alive
 
 		case <-c.ctx.Done():
 			return

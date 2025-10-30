@@ -9,6 +9,17 @@ import "common/v1/types.proto";
 message SendMessageRequest {
   string room_id = 1;
   string content = 2;
+  string reply_to_id = 3;
+  repeated string mention_user_ids = 4;
+  repeated MessageAttachmentUpload attachments = 5;
+}
+
+message MessageAttachmentUpload {
+  string filename = 1;
+  string content_type = 2;
+  bytes data = 3;
+  int32 width = 4;   // optional, for images
+  int32 height = 5;  // optional, for images
 }
 
 message SendMessageResponse {
@@ -46,6 +57,46 @@ message SearchMessagesResponse {
   repeated concord.common.v1.Message messages = 1;
 }
 
+message AddReactionRequest {
+  string message_id = 1;
+  string emoji = 2;
+}
+
+message RemoveReactionRequest {
+  string message_id = 1;
+  string emoji = 2;
+}
+
+message PinMessageRequest {
+  string room_id = 1;
+  string message_id = 2;
+}
+
+message UnpinMessageRequest {
+  string room_id = 1;
+  string message_id = 2;
+}
+
+message ListPinnedMessagesRequest {
+  string room_id = 1;
+}
+
+message ListPinnedMessagesResponse {
+  repeated concord.common.v1.Message messages = 1;
+}
+
+message GetThreadRequest {
+  string message_id = 1;  // parent message ID
+  int32 limit = 2;
+  string cursor = 3;
+}
+
+message GetThreadResponse {
+  repeated concord.common.v1.Message messages = 1;
+  string next_cursor = 2;
+  bool has_more = 3;
+}
+
 message EmptyResponse {}
 
 service ChatService {
@@ -54,4 +105,13 @@ service ChatService {
   rpc DeleteMessage(DeleteMessageRequest) returns (EmptyResponse);
   rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
   rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse);
+
+  rpc AddReaction(AddReactionRequest) returns (EmptyResponse);
+  rpc RemoveReaction(RemoveReactionRequest) returns (EmptyResponse);
+
+  rpc PinMessage(PinMessageRequest) returns (EmptyResponse);
+  rpc UnpinMessage(UnpinMessageRequest) returns (EmptyResponse);
+  rpc ListPinnedMessages(ListPinnedMessagesRequest) returns (ListPinnedMessagesResponse);
+
+  rpc GetThread(GetThreadRequest) returns (GetThreadResponse);
 }

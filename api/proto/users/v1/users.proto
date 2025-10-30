@@ -12,13 +12,46 @@ message GetUserRequest {
   string user_id = 1;
 }
 
+message GetUserByHandleRequest {
+  string handle = 1;
+}
+
 message UpdateProfileRequest {
   string display_name = 1;
   string avatar_url = 2;
+  string bio = 3; 
+}
+
+message UpdateStatusRequest {
+  string status = 1;
+}
+
+message SearchUsersRequest {
+  string query = 1;
+  int32 limit = 2;
+  string cursor = 3;
+}
+
+message SearchUsersResponse {
+  repeated concord.common.v1.User users = 1;
+  string next_cursor = 2;
+  bool has_more = 3;
+}
+
+message ListUsersByIDsRequest {
+  repeated string user_ids = 1;
+}
+
+message ListUsersByIDsResponse {
+  repeated concord.common.v1.User users = 1;
 }
 
 service UsersService {
   rpc GetSelf(GetSelfRequest) returns (concord.common.v1.User);
   rpc GetUser(GetUserRequest) returns (concord.common.v1.User);
+  rpc GetUserByHandle(GetUserByHandleRequest) returns (concord.common.v1.User);
   rpc UpdateProfile(UpdateProfileRequest) returns (concord.common.v1.User);
+  rpc UpdateStatus(UpdateStatusRequest) returns (concord.common.v1.User);
+  rpc SearchUsers(SearchUsersRequest) returns (SearchUsersResponse);
+  rpc ListUsersByIDs(ListUsersByIDsRequest) returns (ListUsersByIDsResponse);
 }

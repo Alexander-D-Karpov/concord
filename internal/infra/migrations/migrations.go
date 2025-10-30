@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -100,13 +101,19 @@ func getMigrationsToApply(appliedVersions map[int]bool) ([]Migration, error) {
 			continue
 		}
 
-		var version int
-		var name string
-		n, err := fmt.Sscanf(entry.Name(), "%d_%s.sql", &version, &name)
-		if err != nil || n != 2 {
-			log.Printf("Skipping file %s: failed to parse (scanned %d fields, err: %v)", entry.Name(), n, err)
+		parts := strings.SplitN(entry.Name(), "_", 2)
+		if len(parts) != 2 {
+			log.Printf("Skipping file %s: invalid format (expected NNN_name.sql)", entry.Name())
 			continue
 		}
+
+		version, err := strconv.Atoi(parts[0])
+		if err != nil {
+			log.Printf("Skipping file %s: invalid version number", entry.Name())
+			continue
+		}
+
+		name := strings.TrimSuffix(parts[1], ".sql")
 
 		if appliedVersions[version] {
 			log.Printf("Migration %d already applied, skipping", version)

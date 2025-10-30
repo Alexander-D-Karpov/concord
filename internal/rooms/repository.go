@@ -16,6 +16,8 @@ type Room struct {
 	CreatedBy     uuid.UUID
 	VoiceServerID *uuid.UUID
 	Region        *string
+	Description   *string
+	IsPrivate     bool
 	CreatedAt     time.Time
 	DeletedAt     *time.Time
 }
@@ -24,6 +26,7 @@ type Member struct {
 	RoomID   uuid.UUID
 	UserID   uuid.UUID
 	Role     string
+	Nickname string
 	JoinedAt time.Time
 }
 
@@ -37,8 +40,8 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 
 func (r *Repository) Create(ctx context.Context, room *Room) error {
 	query := `
-		INSERT INTO rooms (id, name, created_by, voice_server_id, region)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO rooms (id, name, created_by, voice_server_id, region, description, is_private)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING created_at
 	`
 
@@ -52,6 +55,8 @@ func (r *Repository) Create(ctx context.Context, room *Room) error {
 		room.CreatedBy,
 		room.VoiceServerID,
 		room.Region,
+		room.Description,
+		room.IsPrivate,
 	).Scan(&room.CreatedAt)
 
 	return err
@@ -59,7 +64,7 @@ func (r *Repository) Create(ctx context.Context, room *Room) error {
 
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*Room, error) {
 	query := `
-		SELECT id, name, created_by, voice_server_id, region, created_at, deleted_at
+		SELECT id, name, created_by, voice_server_id, region, description, is_private, created_at, deleted_at
 		FROM rooms
 		WHERE id = $1 AND deleted_at IS NULL
 	`
@@ -71,6 +76,8 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*Room, error) {
 		&room.CreatedBy,
 		&room.VoiceServerID,
 		&room.Region,
+		&room.Description,
+		&room.IsPrivate,
 		&room.CreatedAt,
 		&room.DeletedAt,
 	)
@@ -85,9 +92,47 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*Room, error) {
 	return room, nil
 }
 
+func (r *Repository) Update(ctx context.Context, room *Room) error {
+	query := `
+		UPDATE rooms
+		SET name = $2, description = $3, is_private = $4
+		WHERE id = $1 AND deleted_at IS NULL
+	`
+
+	result, err := r.pool.Exec(ctx, query, room.ID, room.Name, room.Description, room.IsPrivate)
+	if err != nil {
+		return err
+	}
+
+	if result.RowsAffected() == 0 {
+		return errors.NotFound("room not found")
+	}
+
+	return nil
+}
+
+func (r *Repository) SoftDelete(ctx context.Context, id uuid.UUID) error {
+	query := `
+		UPDATE rooms
+		SET deleted_at = NOW()
+		WHERE id = $1 AND deleted_at IS NULL
+	`
+
+	result, err := r.pool.Exec(ctx, query, id)
+	if err != nil {
+		return err
+	}
+
+	if result.RowsAffected() == 0 {
+		return errors.NotFound("room not found")
+	}
+
+	return nil
+}
+
 func (r *Repository) ListForUser(ctx context.Context, userID uuid.UUID) ([]*Room, error) {
 	query := `
-		SELECT r.id, r.name, r.created_by, r.voice_server_id, r.region, r.created_at, r.deleted_at
+		SELECT r.id, r.name, r.created_by, r.voice_server_id, r.region, r.description, r.is_private, r.created_at, r.deleted_at
 		FROM rooms r
 		JOIN memberships m ON r.id = m.room_id
 		WHERE m.user_id = $1 AND r.deleted_at IS NULL
@@ -109,6 +154,8 @@ func (r *Repository) ListForUser(ctx context.Context, userID uuid.UUID) ([]*Room
 			&room.CreatedBy,
 			&room.VoiceServerID,
 			&room.Region,
+			&room.Description,
+			&room.IsPrivate,
 			&room.CreatedAt,
 			&room.DeletedAt,
 		); err != nil {
@@ -158,7 +205,7 @@ func (r *Repository) RemoveMember(ctx context.Context, roomID, userID uuid.UUID)
 
 func (r *Repository) GetMember(ctx context.Context, roomID, userID uuid.UUID) (*Member, error) {
 	query := `
-		SELECT room_id, user_id, role, joined_at
+		SELECT room_id, user_id, role, COALESCE(nickname, '') as nickname, joined_at
 		FROM memberships
 		WHERE room_id = $1 AND user_id = $2
 	`
@@ -168,6 +215,7 @@ func (r *Repository) GetMember(ctx context.Context, roomID, userID uuid.UUID) (*
 		&member.RoomID,
 		&member.UserID,
 		&member.Role,
+		&member.Nickname,
 		&member.JoinedAt,
 	)
 
@@ -183,7 +231,7 @@ func (r *Repository) GetMember(ctx context.Context, roomID, userID uuid.UUID) (*
 
 func (r *Repository) ListMembers(ctx context.Context, roomID uuid.UUID) ([]*Member, error) {
 	query := `
-		SELECT room_id, user_id, role, joined_at
+		SELECT room_id, user_id, role, COALESCE(nickname, '') as nickname, joined_at
 		FROM memberships
 		WHERE room_id = $1
 		ORDER BY joined_at ASC
@@ -202,6 +250,7 @@ func (r *Repository) ListMembers(ctx context.Context, roomID uuid.UUID) ([]*Memb
 			&member.RoomID,
 			&member.UserID,
 			&member.Role,
+			&member.Nickname,
 			&member.JoinedAt,
 		); err != nil {
 			return nil, err
@@ -220,6 +269,25 @@ func (r *Repository) UpdateMemberRole(ctx context.Context, roomID, userID uuid.U
 	`
 
 	result, err := r.pool.Exec(ctx, query, roomID, userID, role)
+	if err != nil {
+		return err
+	}
+
+	if result.RowsAffected() == 0 {
+		return errors.NotFound("member not found")
+	}
+
+	return nil
+}
+
+func (r *Repository) UpdateMemberNickname(ctx context.Context, roomID, userID uuid.UUID, nickname string) error {
+	query := `
+		UPDATE memberships
+		SET nickname = $3
+		WHERE room_id = $1 AND user_id = $2
+	`
+
+	result, err := r.pool.Exec(ctx, query, roomID, userID, nickname)
 	if err != nil {
 		return err
 	}

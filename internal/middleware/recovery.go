@@ -10,6 +10,10 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+var debugMethods = map[string]bool{
+	"/concord.registry.v1.RegistryService/Heartbeat": true,
+}
+
 func RecoveryInterceptor(logger *zap.Logger) grpc.UnaryServerInterceptor {
 	return func(
 		ctx context.Context,
@@ -27,6 +31,16 @@ func RecoveryInterceptor(logger *zap.Logger) grpc.UnaryServerInterceptor {
 				err = status.Errorf(codes.Internal, "internal server error")
 			}
 		}()
+
+		if !debugMethods[info.FullMethod] {
+			logger.Info("handling request",
+				zap.String("method", info.FullMethod),
+			)
+		} else {
+			logger.Debug("handling request",
+				zap.String("method", info.FullMethod),
+			)
+		}
 
 		return handler(ctx, req)
 	}

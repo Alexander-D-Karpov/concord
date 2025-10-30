@@ -66,6 +66,29 @@ func (h *Handler) SetRole(ctx context.Context, req *membershipv1.SetRoleRequest)
 	}, nil
 }
 
+func (h *Handler) SetNickname(ctx context.Context, req *membershipv1.SetNicknameRequest) (*commonv1.Member, error) {
+	if req.RoomId == "" {
+		return nil, errors.ToGRPCError(errors.BadRequest("room_id is required"))
+	}
+
+	if err := h.service.SetNickname(ctx, req.RoomId, req.Nickname); err != nil {
+		return nil, errors.ToGRPCError(err)
+	}
+
+	member, err := h.service.GetMember(ctx, req.RoomId)
+	if err != nil {
+		return nil, errors.ToGRPCError(err)
+	}
+
+	return &commonv1.Member{
+		UserId:   member.UserID.String(),
+		RoomId:   member.RoomID.String(),
+		Role:     stringToRole(member.Role),
+		JoinedAt: timestamppb.New(member.JoinedAt),
+		Nickname: req.Nickname,
+	}, nil
+}
+
 func (h *Handler) ListMembers(ctx context.Context, req *membershipv1.ListMembersRequest) (*membershipv1.ListMembersResponse, error) {
 	if req.RoomId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id is required"))
@@ -83,6 +106,7 @@ func (h *Handler) ListMembers(ctx context.Context, req *membershipv1.ListMembers
 			RoomId:   member.RoomID.String(),
 			Role:     stringToRole(member.Role),
 			JoinedAt: timestamppb.New(member.JoinedAt),
+			Nickname: member.Nickname,
 		}
 	}
 

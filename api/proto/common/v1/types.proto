@@ -19,6 +19,8 @@ message User {
   string display_name = 3;
   string avatar_url = 4;
   google.protobuf.Timestamp created_at = 5;
+  string status = 6;
+  string bio = 7;
 }
 
 message Room {
@@ -28,6 +30,8 @@ message Room {
   string voice_server_id = 4;
   string region = 5;
   google.protobuf.Timestamp created_at = 6;
+  string description = 7;
+  bool is_private = 8;
 }
 
 message Member {
@@ -35,6 +39,7 @@ message Member {
   string room_id = 2;
   Role role = 3;
   google.protobuf.Timestamp joined_at = 4;
+  string nickname = 5;
 }
 
 message VoiceServer {
@@ -57,6 +62,31 @@ message Message {
   google.protobuf.Timestamp created_at = 5;
   google.protobuf.Timestamp edited_at = 6;
   bool deleted = 7;
+  string reply_to_id = 8;
+  int32 reply_count = 9;
+  repeated MessageAttachment attachments = 10;
+  repeated string mentions = 11;
+  repeated MessageReaction reactions = 12;
+  bool pinned = 13;
+}
+
+message MessageAttachment {
+  string id = 1;
+  string url = 2;
+  string filename = 3;
+  string content_type = 4;
+  int64 size = 5;
+  int32 width = 6;
+  int32 height = 7; 
+  google.protobuf.Timestamp created_at = 8;
+}
+
+message MessageReaction {
+  string id = 1;
+  string message_id = 2;
+  string user_id = 3;
+  string emoji = 4;
+  google.protobuf.Timestamp created_at = 5;
 }
 
 message Pagination {

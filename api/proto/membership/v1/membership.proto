@@ -22,6 +22,11 @@ message SetRoleRequest {
   concord.common.v1.Role role = 3;
 }
 
+message SetNicknameRequest {
+  string room_id = 1;
+  string nickname = 2;
+}
+
 message ListMembersRequest {
   string room_id = 1;
 }
@@ -36,5 +41,6 @@ service MembershipService {
   rpc Invite(InviteRequest) returns (concord.common.v1.Member);
   rpc Remove(RemoveRequest) returns (EmptyResponse);
   rpc SetRole(SetRoleRequest) returns (concord.common.v1.Member);
+  rpc SetNickname(SetNicknameRequest) returns (concord.common.v1.Member);
   rpc ListMembers(ListMembersRequest) returns (ListMembersResponse);
 }

@@ -7,23 +7,13 @@ option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/stream/v1;
 import "google/protobuf/timestamp.proto";
 import "common/v1/types.proto";
 
-message Subscribe {
-  repeated string room_ids = 1;
-}
-
-message Unsubscribe {
-  repeated string room_ids = 1;
-}
-
 message Ack {
   string event_id = 1;
 }
 
 message ClientEvent {
   oneof payload {
-    Subscribe subscribe = 1;
-    Unsubscribe unsubscribe = 2;
-    Ack ack = 3;
+    Ack ack = 1;
   }
 }
 
@@ -40,6 +30,30 @@ message MessageDeleted {
   string room_id = 2;
 }
 
+message MessageReactionAdded {
+  string message_id = 1;
+  string room_id = 2;
+  concord.common.v1.MessageReaction reaction = 3;
+}
+
+message MessageReactionRemoved {
+  string message_id = 1;
+  string room_id = 2;
+  string reaction_id = 3;
+  string user_id = 4;
+}
+
+message MessagePinned {
+  string message_id = 1;
+  string room_id = 2;
+  string pinned_by = 3;
+}
+
+message MessageUnpinned {
+  string message_id = 1;
+  string room_id = 2;
+}
+
 message MemberJoined {
   concord.common.v1.Member member = 1;
 }
@@ -47,6 +61,12 @@ message MemberJoined {
 message MemberRemoved {
   string room_id = 1;
   string user_id = 2;
+}
+
+message MemberNicknameChanged {
+  string room_id = 1;
+  string user_id = 2;
+  string new_nickname = 3;
 }
 
 message VoiceStateChanged {
@@ -67,6 +87,11 @@ message RoleChanged {
   concord.common.v1.Role new_role = 3;
 }
 
+message UserStatusChanged {
+  string user_id = 1;
+  string status = 2;
+}
+
 message ServerEvent {
   string event_id = 1;
   google.protobuf.Timestamp created_at = 2;
@@ -74,11 +99,17 @@ message ServerEvent {
     MessageCreated message_created = 10;
     MessageEdited message_edited = 11;
     MessageDeleted message_deleted = 12;
-    MemberJoined member_joined = 13;
-    MemberRemoved member_removed = 14;
-    VoiceStateChanged voice_state_changed = 15;
-    RoomUpdated room_updated = 16;
-    RoleChanged role_changed = 17;
+    MessageReactionAdded message_reaction_added = 13;
+    MessageReactionRemoved message_reaction_removed = 14;
+    MessagePinned message_pinned = 15;
+    MessageUnpinned message_unpinned = 16;
+    MemberJoined member_joined = 20;
+    MemberRemoved member_removed = 21;
+    MemberNicknameChanged member_nickname_changed = 22;
+    VoiceStateChanged voice_state_changed = 30;
+    RoomUpdated room_updated = 40;
+    RoleChanged role_changed = 41;
+    UserStatusChanged user_status_changed = 50;
   }
 }
 

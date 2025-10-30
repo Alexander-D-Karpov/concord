@@ -160,16 +160,16 @@ func run() error {
 	usersService := users.NewService(usersRepo)
 	usersHandler := users.NewHandler(usersService)
 
-	roomsRepo := rooms.NewRepository(database.Pool)
-	roomsService := rooms.NewService(roomsRepo)
-	roomsHandler := rooms.NewHandler(roomsService)
-
 	messagesRepo := messages.NewRepository(database.Pool, snowflakeGen)
-	eventsHub := events.NewHub(logger)
+	eventsHub := events.NewHub(logger, database.Pool)
 	chatService := chat.NewService(messagesRepo, eventsHub)
 	chatHandler := chat.NewHandler(chatService)
 
-	membershipService := membership.NewService(roomsRepo)
+	roomsRepo := rooms.NewRepository(database.Pool)
+	roomsService := rooms.NewService(roomsRepo, eventsHub)
+	roomsHandler := rooms.NewHandler(roomsService)
+
+	membershipService := membership.NewService(roomsRepo, eventsHub)
 	membershipHandler := membership.NewHandler(membershipService)
 
 	streamHandler := stream.NewHandler(eventsHub)

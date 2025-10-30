@@ -68,24 +68,6 @@ func (h *Handler) EventStream(stream streamv1.StreamService_EventStreamServer) e
 
 func (h *Handler) handleClientEvent(userID string, event *streamv1.ClientEvent, logger *zap.Logger) {
 	switch payload := event.Payload.(type) {
-	case *streamv1.ClientEvent_Subscribe:
-		for _, roomID := range payload.Subscribe.RoomIds {
-			h.hub.Subscribe(userID, roomID)
-			logger.Debug("user subscribed to room",
-				zap.String("user_id", userID),
-				zap.String("room_id", roomID),
-			)
-		}
-
-	case *streamv1.ClientEvent_Unsubscribe:
-		for _, roomID := range payload.Unsubscribe.RoomIds {
-			h.hub.Unsubscribe(userID, roomID)
-			logger.Debug("user unsubscribed from room",
-				zap.String("user_id", userID),
-				zap.String("room_id", roomID),
-			)
-		}
-
 	case *streamv1.ClientEvent_Ack:
 		logger.Debug("received ack",
 			zap.String("user_id", userID),

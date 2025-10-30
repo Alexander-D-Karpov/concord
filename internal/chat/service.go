@@ -26,7 +26,7 @@ func NewService(repo *messages.Repository, hub *events.Hub) *Service {
 	}
 }
 
-func (s *Service) SendMessage(ctx context.Context, roomID, content string) (*messages.Message, error) {
+func (s *Service) SendMessage(ctx context.Context, roomID, content, replyToID string) (*messages.Message, error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
 		return nil, errors.Unauthorized("user not authenticated")
@@ -48,8 +48,22 @@ func (s *Service) SendMessage(ctx context.Context, roomID, content string) (*mes
 		Content:  content,
 	}
 
+	if replyToID != "" {
+		replyID, err := parseMessageID(replyToID)
+		if err != nil {
+			return nil, errors.BadRequest("invalid reply_to_id")
+		}
+		msg.ReplyToID = &replyID
+	}
+
 	if err := s.repo.Create(ctx, msg); err != nil {
 		return nil, err
+	}
+
+	if msg.ReplyToID != nil {
+		if err := s.repo.IncrementReplyCount(ctx, *msg.ReplyToID); err != nil {
+			return nil, err
+		}
 	}
 
 	s.hub.BroadcastToRoom(roomID, &streamv1.ServerEvent{
@@ -63,6 +77,7 @@ func (s *Service) SendMessage(ctx context.Context, roomID, content string) (*mes
 					AuthorId:  msg.AuthorID.String(),
 					Content:   msg.Content,
 					CreatedAt: timestamppb.New(msg.CreatedAt),
+					ReplyToId: replyToID,
 				},
 			},
 		},
@@ -179,10 +194,208 @@ func (s *Service) ListMessages(ctx context.Context, roomID string, beforeID, aft
 	return s.repo.ListByRoom(ctx, roomUUID, beforeIDInt, afterIDInt, limit)
 }
 
-func parseMessageID(id string) (int64, error) {
-	var result int64
-	for _, c := range id {
-		result = result*10 + int64(c-'0')
+func (s *Service) AddReaction(ctx context.Context, messageID, emoji string) error {
+	userID := interceptor.GetUserID(ctx)
+	if userID == "" {
+		return errors.Unauthorized("user not authenticated")
 	}
-	return result, nil
+
+	msgID, err := parseMessageID(messageID)
+	if err != nil {
+		return errors.BadRequest("invalid message id")
+	}
+
+	userUUID, err := uuid.Parse(userID)
+	if err != nil {
+		return errors.BadRequest("invalid user id")
+	}
+
+	msg, err := s.repo.GetByID(ctx, msgID)
+	if err != nil {
+		return err
+	}
+
+	reaction, err := s.repo.AddReaction(ctx, msgID, userUUID, emoji)
+	if err != nil {
+		return err
+	}
+
+	s.hub.BroadcastToRoom(msg.RoomID.String(), &streamv1.ServerEvent{
+		EventId:   uuid.New().String(),
+		CreatedAt: timestamppb.Now(),
+		Payload: &streamv1.ServerEvent_MessageReactionAdded{
+			MessageReactionAdded: &streamv1.MessageReactionAdded{
+				MessageId: messageID,
+				RoomId:    msg.RoomID.String(),
+				Reaction: &commonv1.MessageReaction{
+					Id:        reaction.ID.String(),
+					MessageId: messageID,
+					UserId:    userID,
+					Emoji:     emoji,
+					CreatedAt: timestamppb.New(reaction.CreatedAt),
+				},
+			},
+		},
+	})
+
+	return nil
 }
+
+func (s *Service) RemoveReaction(ctx context.Context, messageID, emoji string) error {
+	userID := interceptor.GetUserID(ctx)
+	if userID == "" {
+		return errors.Unauthorized("user not authenticated")
+	}
+
+	msgID, err := parseMessageID(messageID)
+	if err != nil {
+		return errors.BadRequest("invalid message id")
+	}
+
+	userUUID, err := uuid.Parse(userID)
+	if err != nil {
+		return errors.BadRequest("invalid user id")
+	}
+
+	msg, err := s.repo.GetByID(ctx, msgID)
+	if err != nil {
+		return err
+	}
+
+	reactionID, err := s.repo.RemoveReaction(ctx, msgID, userUUID, emoji)
+	if err != nil {
+		return err
+	}
+
+	s.hub.BroadcastToRoom(msg.RoomID.String(), &streamv1.ServerEvent{
+		EventId:   uuid.New().String(),
+		CreatedAt: timestamppb.Now(),
+		Payload: &streamv1.ServerEvent_MessageReactionRemoved{
+			MessageReactionRemoved: &streamv1.MessageReactionRemoved{
+				MessageId:  messageID,
+				RoomId:     msg.RoomID.String(),
+				ReactionId: reactionID.String(),
+				UserId:     userID,
+			},
+		},
+	})
+
+	return nil
+}
+
+func (s *Service) PinMessage(ctx context.Context, roomID, messageID string) error {
+	userID := interceptor.GetUserID(ctx)
+	if userID == "" {
+		return errors.Unauthorized("user not authenticated")
+	}
+
+	roomUUID, err := uuid.Parse(roomID)
+	if err != nil {
+		return errors.BadRequest("invalid room id")
+	}
+
+	msgID, err := parseMessageID(messageID)
+	if err != nil {
+		return errors.BadRequest("invalid message id")
+	}
+
+	userUUID, err := uuid.Parse(userID)
+	if err != nil {
+		return errors.BadRequest("invalid user id")
+	}
+
+	if err := s.repo.PinMessage(ctx, roomUUID, msgID, userUUID); err != nil {
+		return err
+	}
+
+	s.hub.BroadcastToRoom(roomID, &streamv1.ServerEvent{
+		EventId:   uuid.New().String(),
+		CreatedAt: timestamppb.Now(),
+		Payload: &streamv1.ServerEvent_MessagePinned{
+			MessagePinned: &streamv1.MessagePinned{
+				MessageId: messageID,
+				RoomId:    roomID,
+				PinnedBy:  userID,
+			},
+		},
+	})
+
+	return nil
+}
+
+func (s *Service) UnpinMessage(ctx context.Context, roomID, messageID string) error {
+	userID := interceptor.GetUserID(ctx)
+	if userID == "" {
+		return errors.Unauthorized("user not authenticated")
+	}
+
+	roomUUID, err := uuid.Parse(roomID)
+	if err != nil {
+		return errors.BadRequest("invalid room id")
+	}
+
+	msgID, err := parseMessageID(messageID)
+	if err != nil {
+		return errors.BadRequest("invalid message id")
+	}
+
+	if err := s.repo.UnpinMessage(ctx, roomUUID, msgID); err != nil {
+		return err
+	}
+
+	s.hub.BroadcastToRoom(roomID, &streamv1.ServerEvent{
+		EventId:   uuid.New().String(),
+		CreatedAt: timestamppb.Now(),
+		Payload: &streamv1.ServerEvent_MessageUnpinned{
+			MessageUnpinned: &streamv1.MessageUnpinned{
+				MessageId: messageID,
+				RoomId:    roomID,
+			},
+		},
+	})
+
+	return nil
+}
+
+func (s *Service) ListPinnedMessages(ctx context.Context, roomID string) ([]*messages.Message, error) {
+	roomUUID, err := uuid.Parse(roomID)
+	if err != nil {
+		return nil, errors.BadRequest("invalid room id")
+	}
+
+	return s.repo.ListPinnedMessages(ctx, roomUUID)
+}
+
+func (s *Service) GetThread(ctx context.Context, parentMessageID string, limit int, cursor string) ([]*messages.Message, string, error) {
+	parentID, err := parseMessageID(parentMessageID)
+	if err != nil {
+		return nil, "", errors.BadRequest("invalid message id")
+	}
+
+	var offset int64
+	if cursor != "" {
+		if _, err := strconv.ParseInt(cursor, 10, 64); err != nil {
+			return nil, "", errors.BadRequest("invalid cursor")
+		}
+		offset, _ = strconv.ParseInt(cursor, 10, 64)
+	}
+
+	messages, err := s.repo.GetThreadReplies(ctx, parentID, limit+1, int(offset))
+	if err != nil {
+		return nil, "", err
+	}
+
+	var nextCursor string
+	if len(messages) > limit {
+		messages = messages[:limit]
+		nextCursor = strconv.FormatInt(offset+int64(limit), 10)
+	}
+
+	return messages, nextCursor, nil
+}
+
+func parseMessageID(id string) (int64, error) {
+	return strconv.ParseInt(id, 10, 64)
+}
+
+type Message = messages.Message

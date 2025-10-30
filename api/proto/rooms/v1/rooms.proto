@@ -10,10 +10,19 @@ message CreateRoomRequest {
   string name = 1;
   string voice_server_id = 2;
   string region = 3;
+  string description = 4;
+  bool is_private = 5;
 }
 
 message GetRoomRequest {
   string room_id = 1;
+}
+
+message UpdateRoomRequest {
+  string room_id = 1;
+  string name = 2;
+  string description = 3;
+  bool is_private = 4;     
 }
 
 message ListRoomsForUserRequest {}
@@ -36,6 +45,7 @@ message EmptyResponse {}
 service RoomsService {
   rpc CreateRoom(CreateRoomRequest) returns (concord.common.v1.Room);
   rpc GetRoom(GetRoomRequest) returns (concord.common.v1.Room);
+  rpc UpdateRoom(UpdateRoomRequest) returns (concord.common.v1.Room);
   rpc ListRoomsForUser(ListRoomsForUserRequest) returns (ListRoomsForUserResponse);
   rpc AttachVoiceServer(AttachVoiceServerRequest) returns (concord.common.v1.Room);
   rpc DeleteRoom(DeleteRoomRequest) returns (EmptyResponse);
