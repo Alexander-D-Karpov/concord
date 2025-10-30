@@ -1,32 +1,34 @@
 FROM golang:1.25-alpine AS builder
-ENV GOTOOLCHAIN=auto
 
-RUN apk add --no-cache git make protobuf-dev
+ENV GOTOOLCHAIN=auto
+RUN apk add --no-cache bash git make protobuf-dev
 
 WORKDIR /build
 
+# Go deps first for better layer caching
 COPY go.mod go.sum ./
 RUN go mod download
 
+# Bring in the rest
 COPY . .
 
 RUN make proto
+
+# Build static binary
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o concord-api ./cmd/concord-api
 
-FROM alpine:latest
 
+FROM alpine:latest
 RUN apk --no-cache add ca-certificates tzdata
 
 WORKDIR /app
-
 COPY --from=builder /build/concord-api .
 
+# Non-root user
 RUN addgroup -g 1000 concord && \
     adduser -D -u 1000 -G concord concord && \
     chown -R concord:concord /app
-
 USER concord
 
 EXPOSE 9090
-
 ENTRYPOINT ["./concord-api"]

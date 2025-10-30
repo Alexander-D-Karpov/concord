@@ -1,7 +1,7 @@
 .PHONY: proto build clean test test-unit test-integration run-api run-voice migrate docker-build lint deps all test-cleanup
 
 proto:
-	@bash scripts/gen_proto.sh
+	@sh scripts/gen_proto.sh
 
 build:
 	@echo "Building concord-api..."
