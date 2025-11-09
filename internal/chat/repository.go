@@ -1,4 +1,4 @@
-package messages
+package chat
 
 import (
 	"context"
@@ -12,17 +12,18 @@ import (
 )
 
 type Message struct {
-	ID         int64
-	RoomID     uuid.UUID
-	AuthorID   uuid.UUID
-	Content    string
-	CreatedAt  time.Time
-	EditedAt   *time.Time
-	DeletedAt  *time.Time
-	ReplyToID  *int64
-	ReplyCount int32
-	Pinned     bool
-	Reactions  []Reaction
+	ID          int64
+	RoomID      uuid.UUID
+	AuthorID    uuid.UUID
+	Content     string
+	CreatedAt   time.Time
+	EditedAt    *time.Time
+	DeletedAt   *time.Time
+	ReplyToID   *int64
+	ReplyCount  int32
+	Pinned      bool
+	Reactions   []Reaction
+	Attachments []Attachment
 }
 
 type Reaction struct {
@@ -31,6 +32,18 @@ type Reaction struct {
 	UserID    uuid.UUID
 	Emoji     string
 	CreatedAt time.Time
+}
+
+type Attachment struct {
+	ID          uuid.UUID
+	MessageID   int64
+	URL         string
+	Filename    string
+	ContentType string
+	Size        int64
+	Width       int
+	Height      int
+	CreatedAt   time.Time
 }
 
 type Repository struct {
@@ -66,7 +79,42 @@ func (r *Repository) Create(ctx context.Context, msg *Message) error {
 		msg.CreatedAt,
 	)
 
-	return err
+	if err != nil {
+		return err
+	}
+
+	if len(msg.Attachments) > 0 {
+		attachQuery := `
+			INSERT INTO message_attachments (id, message_id, url, filename, content_type, size, width, height, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		`
+
+		for i := range msg.Attachments {
+			att := &msg.Attachments[i]
+			if att.ID == uuid.Nil {
+				att.ID = uuid.New()
+			}
+			att.MessageID = msg.ID
+			att.CreatedAt = msg.CreatedAt
+
+			_, err := r.pool.Exec(ctx, attachQuery,
+				att.ID,
+				att.MessageID,
+				att.URL,
+				att.Filename,
+				att.ContentType,
+				att.Size,
+				att.Width,
+				att.Height,
+				att.CreatedAt,
+			)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 func (r *Repository) GetByID(ctx context.Context, id int64) (*Message, error) {
@@ -104,7 +152,48 @@ func (r *Repository) GetByID(ctx context.Context, id int64) (*Message, error) {
 		return nil, err
 	}
 
+	msg.Attachments, err = r.GetAttachments(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
 	return msg, nil
+}
+
+func (r *Repository) GetAttachments(ctx context.Context, messageID int64) ([]Attachment, error) {
+	query := `
+		SELECT id, message_id, url, filename, content_type, size, width, height, created_at
+		FROM message_attachments
+		WHERE message_id = $1
+		ORDER BY created_at ASC
+	`
+
+	rows, err := r.pool.Query(ctx, query, messageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var attachments []Attachment
+	for rows.Next() {
+		var att Attachment
+		if err := rows.Scan(
+			&att.ID,
+			&att.MessageID,
+			&att.URL,
+			&att.Filename,
+			&att.ContentType,
+			&att.Size,
+			&att.Width,
+			&att.Height,
+			&att.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		attachments = append(attachments, att)
+	}
+
+	return attachments, rows.Err()
 }
 
 func (r *Repository) ListByRoom(ctx context.Context, roomID uuid.UUID, beforeID, afterID *int64, limit int) ([]*Message, error) {
@@ -179,10 +268,15 @@ func (r *Repository) ListByRoom(ctx context.Context, roomID uuid.UUID, beforeID,
 			return nil, err
 		}
 
+		msg.Attachments, err = r.GetAttachments(ctx, msg.ID)
+		if err != nil {
+			return nil, err
+		}
+
 		messages = append(messages, msg)
 	}
 
-	if afterID != nil {
+	if beforeID == nil && afterID == nil {
 		for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
 			messages[i], messages[j] = messages[j], messages[i]
 		}
@@ -371,6 +465,11 @@ func (r *Repository) ListPinnedMessages(ctx context.Context, roomID uuid.UUID) (
 			return nil, err
 		}
 
+		msg.Attachments, err = r.GetAttachments(ctx, msg.ID)
+		if err != nil {
+			return nil, err
+		}
+
 		messages = append(messages, msg)
 	}
 
@@ -424,6 +523,11 @@ func (r *Repository) GetThreadReplies(ctx context.Context, parentID int64, limit
 		}
 
 		msg.Reactions, err = r.GetReactions(ctx, msg.ID)
+		if err != nil {
+			return nil, err
+		}
+
+		msg.Attachments, err = r.GetAttachments(ctx, msg.ID)
 		if err != nil {
 			return nil, err
 		}

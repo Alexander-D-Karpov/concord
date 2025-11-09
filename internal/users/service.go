@@ -4,17 +4,24 @@ import (
 	"context"
 	"fmt"
 
+	streamv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/stream/v1"
 	"github.com/Alexander-D-Karpov/concord/internal/auth/interceptor"
 	"github.com/Alexander-D-Karpov/concord/internal/common/errors"
+	"github.com/Alexander-D-Karpov/concord/internal/events"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type Service struct {
 	repo *Repository
+	hub  *events.Hub
 }
 
-func NewService(repo *Repository) *Service {
-	return &Service{repo: repo}
+func NewService(repo *Repository, hub *events.Hub) *Service {
+	return &Service{
+		repo: repo,
+		hub:  hub,
+	}
 }
 
 func (s *Service) GetSelf(ctx context.Context) (*User, error) {
@@ -92,7 +99,59 @@ func (s *Service) UpdateStatus(ctx context.Context, status string) (*User, error
 		return nil, err
 	}
 
-	return s.repo.GetByID(ctx, id)
+	user, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	if s.hub != nil {
+		friends, err := s.getFriendsList(ctx, id)
+		if err == nil {
+			for _, friendID := range friends {
+				s.hub.BroadcastToRoom(friendID.String(), &streamv1.ServerEvent{
+					EventId:   uuid.New().String(),
+					CreatedAt: timestamppb.Now(),
+					Payload: &streamv1.ServerEvent_UserStatusChanged{
+						UserStatusChanged: &streamv1.UserStatusChanged{
+							UserId: userID,
+							Status: status,
+						},
+					},
+				})
+			}
+		}
+	}
+
+	return user, nil
+}
+
+func (s *Service) getFriendsList(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
+	query := `
+		SELECT 
+			CASE 
+				WHEN user_id1 = $1 THEN user_id2
+				ELSE user_id1
+			END as friend_id
+		FROM friendships
+		WHERE user_id1 = $1 OR user_id2 = $1
+	`
+
+	rows, err := s.repo.Pool().Query(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var friends []uuid.UUID
+	for rows.Next() {
+		var friendID uuid.UUID
+		if err := rows.Scan(&friendID); err != nil {
+			return nil, err
+		}
+		friends = append(friends, friendID)
+	}
+
+	return friends, rows.Err()
 }
 
 func (s *Service) SearchUsers(ctx context.Context, query string, limit int, cursor *string) ([]*User, *string, error) {

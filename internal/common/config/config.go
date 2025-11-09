@@ -14,6 +14,8 @@ type Config struct {
 	Logging   LoggingConfig
 	Redis     RedisConfig
 	RateLimit RateLimitConfig
+	Storage   StorageConfig
+	Email     EmailConfig
 }
 
 type ServerConfig struct {
@@ -83,10 +85,24 @@ type RedisConfig struct {
 	Enabled  bool
 }
 
+type StorageConfig struct {
+	Path string
+	URL  string
+}
+
 type RateLimitConfig struct {
 	Enabled           bool
 	RequestsPerMinute int
 	Burst             int
+}
+
+type EmailConfig struct {
+	SMTPHost    string
+	SMTPPort    int
+	Username    string
+	Password    string
+	FromAddress string
+	FromName    string
 }
 
 func Load() (*Config, error) {
@@ -147,6 +163,16 @@ func Load() (*Config, error) {
 			Enabled:           getEnvBool("RATE_LIMIT_ENABLED", true),
 			RequestsPerMinute: getEnvInt("RATE_LIMIT_REQUESTS_PER_MINUTE", 60),
 			Burst:             getEnvInt("RATE_LIMIT_BURST", 10),
+		},
+		Storage: StorageConfig{
+			Path: getEnv("STORAGE_PATH", "./uploads"),
+			URL:  getEnv("STORAGE_URL", "http://localhost:8080/files"),
+		},
+		Email: EmailConfig{
+			SMTPHost: getEnv("EMAIL_SMTP_HOST", "smtp.example.com"),
+			SMTPPort: getEnvInt("EMAIL_SMTP_PORT", 587),
+			Username: getEnv("EMAIL_USERNAME", ""),
+			Password: getEnv("EMAIL_PASSWORD", ""),
 		},
 	}
 	return cfg, nil

@@ -2,31 +2,72 @@ package chat
 
 import (
 	"context"
+	"fmt"
 	"strconv"
+	"time"
 
 	commonv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/common/v1"
 	streamv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/stream/v1"
 	"github.com/Alexander-D-Karpov/concord/internal/auth/interceptor"
 	"github.com/Alexander-D-Karpov/concord/internal/common/errors"
 	"github.com/Alexander-D-Karpov/concord/internal/events"
-	"github.com/Alexander-D-Karpov/concord/internal/messages"
+	"github.com/Alexander-D-Karpov/concord/internal/infra/cache"
+	"github.com/Alexander-D-Karpov/concord/internal/rooms"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type Service struct {
-	repo *messages.Repository
-	hub  *events.Hub
+	repo      *Repository
+	hub       *events.Hub
+	roomsRepo *rooms.Repository
+	cache     *cache.AsidePattern
 }
 
-func NewService(repo *messages.Repository, hub *events.Hub) *Service {
+func NewService(repo *Repository, roomsRepo *rooms.Repository, hub *events.Hub, aside *cache.AsidePattern) *Service {
 	return &Service{
-		repo: repo,
-		hub:  hub,
+		repo:      repo,
+		hub:       hub,
+		roomsRepo: roomsRepo,
+		cache:     aside,
 	}
 }
 
-func (s *Service) SendMessage(ctx context.Context, roomID, content, replyToID string) (*messages.Message, error) {
+func (s *Service) isMember(ctx context.Context, roomID, userID uuid.UUID) (bool, error) {
+	const ttl = 30 * time.Second
+	key := fmt.Sprintf("m:%s:%s", roomID.String(), userID.String())
+
+	loader := func() (interface{}, error) {
+		_, err := s.roomsRepo.GetMember(ctx, roomID, userID)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return false, nil
+			}
+			return nil, err
+		}
+		return true, nil
+	}
+
+	if s.cache != nil {
+		v, err := s.cache.GetOrLoad(ctx, key, ttl, loader)
+		if err == nil {
+			if b, ok := v.(bool); ok {
+				return b, nil
+			}
+		}
+	}
+
+	_, err := s.roomsRepo.GetMember(ctx, roomID, userID)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Service) SendMessage(ctx context.Context, roomID, content, replyToID string, attachments []Attachment) (*Message, error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
 		return nil, errors.Unauthorized("user not authenticated")
@@ -36,16 +77,24 @@ func (s *Service) SendMessage(ctx context.Context, roomID, content, replyToID st
 	if err != nil {
 		return nil, errors.BadRequest("invalid room id")
 	}
-
 	authorUUID, err := uuid.Parse(userID)
 	if err != nil {
 		return nil, errors.BadRequest("invalid user id")
 	}
 
-	msg := &messages.Message{
-		RoomID:   roomUUID,
-		AuthorID: authorUUID,
-		Content:  content,
+	ok, err := s.isMember(ctx, roomUUID, authorUUID)
+	if err != nil {
+		return nil, errors.Internal("membership check failed", err)
+	}
+	if !ok {
+		return nil, errors.Forbidden("not a room member")
+	}
+
+	msg := &Message{
+		RoomID:      roomUUID,
+		AuthorID:    authorUUID,
+		Content:     content,
+		Attachments: attachments,
 	}
 
 	if replyToID != "" {
@@ -66,27 +115,44 @@ func (s *Service) SendMessage(ctx context.Context, roomID, content, replyToID st
 		}
 	}
 
-	s.hub.BroadcastToRoom(roomID, &streamv1.ServerEvent{
-		EventId:   uuid.New().String(),
-		CreatedAt: timestamppb.Now(),
-		Payload: &streamv1.ServerEvent_MessageCreated{
-			MessageCreated: &streamv1.MessageCreated{
-				Message: &commonv1.Message{
-					Id:        strconv.FormatInt(msg.ID, 10),
-					RoomId:    msg.RoomID.String(),
-					AuthorId:  msg.AuthorID.String(),
-					Content:   msg.Content,
-					CreatedAt: timestamppb.New(msg.CreatedAt),
-					ReplyToId: replyToID,
+	protoAttachments := make([]*commonv1.MessageAttachment, len(msg.Attachments))
+	for i, att := range msg.Attachments {
+		protoAttachments[i] = &commonv1.MessageAttachment{
+			Id:          att.ID.String(),
+			Url:         att.URL,
+			Filename:    att.Filename,
+			ContentType: att.ContentType,
+			Size:        att.Size,
+			Width:       int32(att.Width),
+			Height:      int32(att.Height),
+			CreatedAt:   timestamppb.New(att.CreatedAt),
+		}
+	}
+
+	if s.hub != nil {
+		go s.hub.BroadcastToRoom(roomID, &streamv1.ServerEvent{
+			EventId:   uuid.New().String(),
+			CreatedAt: timestamppb.Now(),
+			Payload: &streamv1.ServerEvent_MessageCreated{
+				MessageCreated: &streamv1.MessageCreated{
+					Message: &commonv1.Message{
+						Id:          strconv.FormatInt(msg.ID, 10),
+						RoomId:      msg.RoomID.String(),
+						AuthorId:    msg.AuthorID.String(),
+						Content:     msg.Content,
+						CreatedAt:   timestamppb.New(msg.CreatedAt),
+						ReplyToId:   replyToID,
+						Attachments: protoAttachments,
+					},
 				},
 			},
-		},
-	})
+		})
+	}
 
 	return msg, nil
 }
 
-func (s *Service) EditMessage(ctx context.Context, messageID, content string) (*messages.Message, error) {
+func (s *Service) EditMessage(ctx context.Context, messageID, content string) (*Message, error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
 		return nil, errors.Unauthorized("user not authenticated")
@@ -111,7 +177,7 @@ func (s *Service) EditMessage(ctx context.Context, messageID, content string) (*
 		return nil, err
 	}
 
-	s.hub.BroadcastToRoom(msg.RoomID.String(), &streamv1.ServerEvent{
+	go s.hub.BroadcastToRoom(msg.RoomID.String(), &streamv1.ServerEvent{
 		EventId:   uuid.New().String(),
 		CreatedAt: timestamppb.Now(),
 		Payload: &streamv1.ServerEvent_MessageEdited{
@@ -155,7 +221,7 @@ func (s *Service) DeleteMessage(ctx context.Context, messageID string) error {
 		return err
 	}
 
-	s.hub.BroadcastToRoom(msg.RoomID.String(), &streamv1.ServerEvent{
+	go s.hub.BroadcastToRoom(msg.RoomID.String(), &streamv1.ServerEvent{
 		EventId:   uuid.New().String(),
 		CreatedAt: timestamppb.Now(),
 		Payload: &streamv1.ServerEvent_MessageDeleted{
@@ -169,7 +235,7 @@ func (s *Service) DeleteMessage(ctx context.Context, messageID string) error {
 	return nil
 }
 
-func (s *Service) ListMessages(ctx context.Context, roomID string, beforeID, afterID *string, limit int) ([]*messages.Message, error) {
+func (s *Service) ListMessages(ctx context.Context, roomID string, beforeID, afterID *string, limit int) ([]*Message, error) {
 	roomUUID, err := uuid.Parse(roomID)
 	if err != nil {
 		return nil, errors.BadRequest("invalid room id")
@@ -220,7 +286,7 @@ func (s *Service) AddReaction(ctx context.Context, messageID, emoji string) erro
 		return err
 	}
 
-	s.hub.BroadcastToRoom(msg.RoomID.String(), &streamv1.ServerEvent{
+	go s.hub.BroadcastToRoom(msg.RoomID.String(), &streamv1.ServerEvent{
 		EventId:   uuid.New().String(),
 		CreatedAt: timestamppb.Now(),
 		Payload: &streamv1.ServerEvent_MessageReactionAdded{
@@ -267,7 +333,7 @@ func (s *Service) RemoveReaction(ctx context.Context, messageID, emoji string) e
 		return err
 	}
 
-	s.hub.BroadcastToRoom(msg.RoomID.String(), &streamv1.ServerEvent{
+	go s.hub.BroadcastToRoom(msg.RoomID.String(), &streamv1.ServerEvent{
 		EventId:   uuid.New().String(),
 		CreatedAt: timestamppb.Now(),
 		Payload: &streamv1.ServerEvent_MessageReactionRemoved{
@@ -308,7 +374,7 @@ func (s *Service) PinMessage(ctx context.Context, roomID, messageID string) erro
 		return err
 	}
 
-	s.hub.BroadcastToRoom(roomID, &streamv1.ServerEvent{
+	go s.hub.BroadcastToRoom(roomID, &streamv1.ServerEvent{
 		EventId:   uuid.New().String(),
 		CreatedAt: timestamppb.Now(),
 		Payload: &streamv1.ServerEvent_MessagePinned{
@@ -343,7 +409,7 @@ func (s *Service) UnpinMessage(ctx context.Context, roomID, messageID string) er
 		return err
 	}
 
-	s.hub.BroadcastToRoom(roomID, &streamv1.ServerEvent{
+	go s.hub.BroadcastToRoom(roomID, &streamv1.ServerEvent{
 		EventId:   uuid.New().String(),
 		CreatedAt: timestamppb.Now(),
 		Payload: &streamv1.ServerEvent_MessageUnpinned{
@@ -357,7 +423,7 @@ func (s *Service) UnpinMessage(ctx context.Context, roomID, messageID string) er
 	return nil
 }
 
-func (s *Service) ListPinnedMessages(ctx context.Context, roomID string) ([]*messages.Message, error) {
+func (s *Service) ListPinnedMessages(ctx context.Context, roomID string) ([]*Message, error) {
 	roomUUID, err := uuid.Parse(roomID)
 	if err != nil {
 		return nil, errors.BadRequest("invalid room id")
@@ -366,7 +432,7 @@ func (s *Service) ListPinnedMessages(ctx context.Context, roomID string) ([]*mes
 	return s.repo.ListPinnedMessages(ctx, roomUUID)
 }
 
-func (s *Service) GetThread(ctx context.Context, parentMessageID string, limit int, cursor string) ([]*messages.Message, string, error) {
+func (s *Service) GetThread(ctx context.Context, parentMessageID string, limit int, cursor string) ([]*Message, string, error) {
 	parentID, err := parseMessageID(parentMessageID)
 	if err != nil {
 		return nil, "", errors.BadRequest("invalid message id")
@@ -397,5 +463,3 @@ func (s *Service) GetThread(ctx context.Context, parentMessageID string, limit i
 func parseMessageID(id string) (int64, error) {
 	return strconv.ParseInt(id, 10, 64)
 }
-
-type Message = messages.Message

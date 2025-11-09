@@ -6,18 +6,23 @@ import (
 
 	chatv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/chat/v1"
 	commonv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/common/v1"
+	"github.com/Alexander-D-Karpov/concord/internal/auth/interceptor"
 	"github.com/Alexander-D-Karpov/concord/internal/common/errors"
+	"github.com/Alexander-D-Karpov/concord/internal/storage"
+	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type Handler struct {
 	chatv1.UnimplementedChatServiceServer
 	service *Service
+	storage *storage.Storage
 }
 
-func NewHandler(service *Service) *Handler {
+func NewHandler(service *Service, storageService *storage.Storage) *Handler {
 	return &Handler{
 		service: service,
+		storage: storageService,
 	}
 }
 
@@ -25,11 +30,39 @@ func (h *Handler) SendMessage(ctx context.Context, req *chatv1.SendMessageReques
 	if req.RoomId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id is required"))
 	}
-	if req.Content == "" {
-		return nil, errors.ToGRPCError(errors.BadRequest("content is required"))
+	if req.Content == "" && len(req.Attachments) == 0 {
+		return nil, errors.ToGRPCError(errors.BadRequest("content or attachments are required"))
 	}
 
-	msg, err := h.service.SendMessage(ctx, req.RoomId, req.Content, req.ReplyToId)
+	userID := interceptor.GetUserID(ctx)
+	if userID == "" {
+		return nil, errors.ToGRPCError(errors.Unauthorized("user not authenticated"))
+	}
+
+	var attachments []Attachment
+	for _, upload := range req.Attachments {
+		if len(upload.Data) == 0 {
+			continue
+		}
+
+		fileInfo, err := h.storage.Store(ctx, upload.Data, upload.Filename, upload.ContentType)
+		if err != nil {
+			return nil, errors.ToGRPCError(errors.Internal("failed to store attachment", err))
+		}
+
+		attachment := Attachment{
+			ID:          uuid.New(),
+			URL:         fileInfo.URL,
+			Filename:    fileInfo.Filename,
+			ContentType: fileInfo.ContentType,
+			Size:        fileInfo.Size,
+			Width:       int(upload.Width),
+			Height:      int(upload.Height),
+		}
+		attachments = append(attachments, attachment)
+	}
+
+	msg, err := h.service.SendMessage(ctx, req.RoomId, req.Content, req.ReplyToId, attachments)
 	if err != nil {
 		return nil, errors.ToGRPCError(err)
 	}
@@ -245,6 +278,21 @@ func messageToProto(msg *Message) *commonv1.Message {
 		}
 	}
 	protoMsg.Reactions = reactions
+
+	attachments := make([]*commonv1.MessageAttachment, len(msg.Attachments))
+	for i, att := range msg.Attachments {
+		attachments[i] = &commonv1.MessageAttachment{
+			Id:          att.ID.String(),
+			Url:         att.URL,
+			Filename:    att.Filename,
+			ContentType: att.ContentType,
+			Size:        att.Size,
+			Width:       int32(att.Width),
+			Height:      int32(att.Height),
+			CreatedAt:   timestamppb.New(att.CreatedAt),
+		}
+	}
+	protoMsg.Attachments = attachments
 
 	return protoMsg
 }

@@ -7,7 +7,7 @@ cd api/proto
 
 mkdir -p ../gen/go
 
-for dir in common/v1 auth/v1 users/v1 rooms/v1 membership/v1 chat/v1 stream/v1 call/v1 registry/v1 admin/v1; do
+for dir in friends/v1 common/v1 auth/v1 users/v1 rooms/v1 membership/v1 chat/v1 stream/v1 call/v1 registry/v1 admin/v1; do
     echo "Generating for $dir..."
 
     protoc \

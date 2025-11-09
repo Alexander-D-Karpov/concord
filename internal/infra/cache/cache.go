@@ -35,6 +35,10 @@ func New(host string, port int, password string, db int) (*Cache, error) {
 	return &Cache{client: client}, nil
 }
 
+func (c *Cache) Client() *redis.Client {
+	return c.client
+}
+
 func (c *Cache) Set(ctx context.Context, key string, value interface{}, ttl time.Duration) error {
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -98,3 +102,19 @@ func (c *Cache) FlushAll(ctx context.Context) error {
 }
 
 var ErrCacheMiss = fmt.Errorf("cache miss")
+
+func (c *Cache) DeletePattern(ctx context.Context, pattern string) error {
+	iter := c.client.Scan(ctx, 0, pattern, 0).Iterator()
+	pipe := c.client.Pipeline()
+
+	for iter.Next(ctx) {
+		pipe.Del(ctx, iter.Val())
+	}
+
+	if err := iter.Err(); err != nil {
+		return err
+	}
+
+	_, err := pipe.Exec(ctx)
+	return err
+}

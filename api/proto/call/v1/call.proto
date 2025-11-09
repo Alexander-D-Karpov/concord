@@ -4,6 +4,8 @@ package concord.call.v1;
 
 option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/call/v1;callv1";
 
+import "google/protobuf/timestamp.proto";
+
 message JoinVoiceRequest {
   string room_id = 1;
   bool audio_only = 2;
@@ -55,8 +57,27 @@ message SetMediaPrefsRequest {
 
 message EmptyResponse {}
 
+
+message GetVoiceStatusRequest {
+  string room_id = 1;
+}
+
+message VoiceParticipant {
+  string user_id = 1;
+  bool muted = 2;
+  bool video_enabled = 3;
+  bool speaking = 4;
+  google.protobuf.Timestamp joined_at = 5;
+}
+
+message GetVoiceStatusResponse {
+  repeated VoiceParticipant participants = 1;
+  int32 total_participants = 2;
+}
+
 service CallService {
   rpc JoinVoice(JoinVoiceRequest) returns (JoinVoiceResponse);
   rpc LeaveVoice(LeaveVoiceRequest) returns (EmptyResponse);
   rpc SetMediaPrefs(SetMediaPrefsRequest) returns (EmptyResponse);
+  rpc GetVoiceStatus(GetVoiceStatusRequest) returns (GetVoiceStatusResponse);
 }

@@ -21,6 +21,7 @@ type Metrics struct {
 	cacheHits         *prometheus.CounterVec
 	errorTotal        *prometheus.CounterVec
 	logger            *zap.Logger
+	server            *http.Server
 }
 
 func NewMetrics(logger *zap.Logger) *Metrics {
@@ -155,7 +156,7 @@ func (m *Metrics) Start(ctx context.Context, port int) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 
-	server := &http.Server{
+	m.server = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
 		Handler: mux,
 	}
@@ -164,7 +165,7 @@ func (m *Metrics) Start(ctx context.Context, port int) error {
 
 	errChan := make(chan error, 1)
 	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errChan <- err
 		}
 	}()
@@ -173,8 +174,13 @@ func (m *Metrics) Start(ctx context.Context, port int) error {
 	case err := <-errChan:
 		return err
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return server.Shutdown(shutdownCtx)
+		return m.Stop(context.Background())
 	}
+}
+
+func (m *Metrics) Stop(ctx context.Context) error {
+	if m.server == nil {
+		return nil
+	}
+	return m.server.Shutdown(ctx)
 }

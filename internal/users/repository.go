@@ -33,6 +33,10 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
+func (r *Repository) Pool() *pgxpool.Pool {
+	return r.pool
+}
+
 func (r *Repository) Create(ctx context.Context, user *User) error {
 	query := `
 		INSERT INTO users (id, handle, display_name, avatar_url, oauth_provider, oauth_subject, password_hash, status)

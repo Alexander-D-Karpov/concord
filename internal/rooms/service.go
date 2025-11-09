@@ -2,25 +2,26 @@ package rooms
 
 import (
 	"context"
+	"fmt"
 
 	streamv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/stream/v1"
 	"github.com/Alexander-D-Karpov/concord/internal/auth/interceptor"
 	"github.com/Alexander-D-Karpov/concord/internal/common/errors"
 	"github.com/Alexander-D-Karpov/concord/internal/events"
+	"github.com/Alexander-D-Karpov/concord/internal/infra/cache"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type Service struct {
-	repo *Repository
-	hub  *events.Hub
+	repo  *Repository
+	hub   *events.Hub
+	cache *cache.AsidePattern
 }
 
-func NewService(repo *Repository, hub *events.Hub) *Service {
-	return &Service{
-		repo: repo,
-		hub:  hub,
-	}
+func NewService(repo *Repository, hub *events.Hub, aside *cache.AsidePattern) *Service {
+	return &Service{repo: repo, hub: hub, cache: aside}
 }
 
 func (s *Service) CreateRoom(ctx context.Context, name string, voiceServerID *string, region *string, description string, isPrivate bool) (*Room, error) {
@@ -61,8 +62,20 @@ func (s *Service) CreateRoom(ctx context.Context, name string, voiceServerID *st
 		return nil, err
 	}
 
+	if s.cache != nil {
+		_ = s.cache.Invalidate(ctx,
+			fmt.Sprintf("u:%s:rooms", userID),
+			fmt.Sprintf("m:%s:%s", room.ID.String(), userID),
+		)
+	}
+
 	if s.hub != nil {
-		s.hub.NotifyRoomJoin(userID, room.ID.String())
+		success := s.hub.NotifyRoomJoinSync(userID, room.ID.String())
+		s.hub.Logger().Info("attempted to subscribe room creator",
+			zap.String("user_id", userID),
+			zap.String("room_id", room.ID.String()),
+			zap.Bool("success", success),
+		)
 	}
 
 	return room, nil
@@ -163,6 +176,12 @@ func (s *Service) DeleteRoom(ctx context.Context, roomID string) error {
 	if err == nil && s.hub != nil {
 		for _, member := range members {
 			s.hub.NotifyRoomLeave(member.UserID.String(), roomID)
+			if s.cache != nil {
+				_ = s.cache.Invalidate(ctx,
+					fmt.Sprintf("u:%s:rooms", member.UserID.String()),
+					fmt.Sprintf("m:%s:%s", roomID, member.UserID.String()),
+				)
+			}
 		}
 	}
 

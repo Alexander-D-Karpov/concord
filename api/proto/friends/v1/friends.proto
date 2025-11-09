@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package concord.friends.v1;
+
+option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/friends/v1;friendsv1";
+
+import "google/protobuf/timestamp.proto";
+
+enum FriendRequestStatus {
+  FRIEND_REQUEST_STATUS_UNSPECIFIED = 0;
+  FRIEND_REQUEST_STATUS_PENDING = 1;
+  FRIEND_REQUEST_STATUS_ACCEPTED = 2;
+  FRIEND_REQUEST_STATUS_REJECTED = 3;
+}
+
+message FriendRequest {
+  string id = 1;
+  string from_user_id = 2;
+  string to_user_id = 3;
+  FriendRequestStatus status = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+
+  string from_handle = 7;
+  string from_display_name = 8;
+  string from_avatar_url = 9;
+  string to_handle = 10;
+  string to_display_name = 11;
+  string to_avatar_url = 12;
+}
+
+message Friend {
+  string user_id = 1;
+  string handle = 2;
+  string display_name = 3;
+  string avatar_url = 4;
+  string status = 5;
+  google.protobuf.Timestamp friends_since = 6;
+}
+
+message SendFriendRequestRequest {
+  string user_id = 1;
+}
+
+message SendFriendRequestResponse {
+  FriendRequest request = 1;
+}
+
+message AcceptFriendRequestRequest {
+  string request_id = 1;
+}
+
+message RejectFriendRequestRequest {
+  string request_id = 1;
+}
+
+message CancelFriendRequestRequest {
+  string request_id = 1;
+}
+
+message RemoveFriendRequest {
+  string user_id = 1;
+}
+
+message ListFriendsRequest {}
+
+message ListFriendsResponse {
+  repeated Friend friends = 1;
+}
+
+message ListPendingRequestsRequest {}
+
+message ListPendingRequestsResponse {
+  repeated FriendRequest incoming = 1;
+  repeated FriendRequest outgoing = 2;
+}
+
+message BlockUserRequest {
+  string user_id = 1;
+}
+
+message UnblockUserRequest {
+  string user_id = 1;
+}
+
+message ListBlockedUsersRequest {}
+
+message ListBlockedUsersResponse {
+  repeated string user_ids = 1;
+}
+
+message EmptyResponse {}
+
+service FriendsService {
+  rpc SendFriendRequest(SendFriendRequestRequest) returns (SendFriendRequestResponse);
+  rpc AcceptFriendRequest(AcceptFriendRequestRequest) returns (EmptyResponse);
+  rpc RejectFriendRequest(RejectFriendRequestRequest) returns (EmptyResponse);
+  rpc CancelFriendRequest(CancelFriendRequestRequest) returns (EmptyResponse);
+  rpc RemoveFriend(RemoveFriendRequest) returns (EmptyResponse);
+
+  rpc ListFriends(ListFriendsRequest) returns (ListFriendsResponse);
+  rpc ListPendingRequests(ListPendingRequestsRequest) returns (ListPendingRequestsResponse);
+
+  rpc BlockUser(BlockUserRequest) returns (EmptyResponse);
+  rpc UnblockUser(UnblockUserRequest) returns (EmptyResponse);
+  rpc ListBlockedUsers(ListBlockedUsersRequest) returns (ListBlockedUsersResponse);
+}

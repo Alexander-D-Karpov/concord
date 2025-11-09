@@ -6,6 +6,7 @@ option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/stream/v1;
 
 import "google/protobuf/timestamp.proto";
 import "common/v1/types.proto";
+import "friends/v1/friends.proto";
 
 message Ack {
   string event_id = 1;
@@ -92,6 +93,24 @@ message UserStatusChanged {
   string status = 2;
 }
 
+message VoiceUserJoined {
+  string room_id = 1;
+  string user_id = 2;
+  bool audio_only = 3;
+}
+
+message VoiceUserLeft {
+  string room_id = 1;
+  string user_id = 2;
+}
+
+message FriendRequestCreated {
+  concord.friends.v1.FriendRequest request = 1;
+}
+message FriendRequestUpdated {
+  concord.friends.v1.FriendRequest request = 1;
+}
+
 message ServerEvent {
   string event_id = 1;
   google.protobuf.Timestamp created_at = 2;
@@ -110,6 +129,10 @@ message ServerEvent {
     RoomUpdated room_updated = 40;
     RoleChanged role_changed = 41;
     UserStatusChanged user_status_changed = 50;
+    VoiceUserJoined voice_user_joined = 60;
+    VoiceUserLeft voice_user_left = 61;
+    FriendRequestCreated friend_request_created = 70;
+    FriendRequestUpdated friend_request_updated = 71;
   }
 }
 

@@ -44,10 +44,10 @@ func (s *Service) Heartbeat(ctx context.Context, serverID uuid.UUID, activeRooms
 		return err
 	}
 
-	s.logger.Debug("heartbeat received",
-		zap.String("server_id", serverID.String()),
-		zap.Int32("active_sessions", activeSessions),
-	)
+	//s.logger.Debug("heartbeat received",
+	//	zap.String("server_id", serverID.String()),
+	//	zap.Int32("active_sessions", activeSessions),
+	//)
 
 	return nil
 }

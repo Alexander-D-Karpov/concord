@@ -17,9 +17,10 @@ import (
 
 func TestRoomCreationAndMembership(t *testing.T) {
 	database := testutil.GetDB(t)
+	aside := testutil.GetAside(t)
 
 	logger, _ := logging.Init("info", "json", "stdout", false, "")
-	eventsHub := events.NewHub(logger, database.Pool)
+	eventsHub := events.NewHub(logger, database.Pool, aside)
 
 	usersRepo := users.NewRepository(database.Pool)
 	roomsRepo := rooms.NewRepository(database.Pool)
@@ -69,9 +70,10 @@ func TestRoomCreationAndMembership(t *testing.T) {
 
 func TestRoomsList(t *testing.T) {
 	database := testutil.GetDB(t)
+	aside := testutil.GetAside(t)
 
 	logger, _ := logging.Init("info", "json", "stdout", false, "")
-	eventsHub := events.NewHub(logger, database.Pool)
+	eventsHub := events.NewHub(logger, database.Pool, aside)
 
 	usersRepo := users.NewRepository(database.Pool)
 	roomsRepo := rooms.NewRepository(database.Pool)

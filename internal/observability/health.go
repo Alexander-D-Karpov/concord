@@ -39,6 +39,7 @@ type HealthChecker struct {
 	startTime time.Time
 	version   string
 	mu        sync.RWMutex
+	server    *http.Server
 }
 
 type HealthCheck func(context.Context) (HealthStatus, string, error)
@@ -64,7 +65,7 @@ func (h *HealthChecker) Start(ctx context.Context, port int) error {
 	mux.HandleFunc("/health/ready", h.handleReadiness)
 	mux.HandleFunc("/health/live", h.handleLiveness)
 
-	server := &http.Server{
+	h.server = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
 		Handler: mux,
 	}
@@ -73,7 +74,7 @@ func (h *HealthChecker) Start(ctx context.Context, port int) error {
 
 	errChan := make(chan error, 1)
 	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := h.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errChan <- err
 		}
 	}()
@@ -82,10 +83,15 @@ func (h *HealthChecker) Start(ctx context.Context, port int) error {
 	case err := <-errChan:
 		return err
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return server.Shutdown(shutdownCtx)
+		return h.Stop(context.Background())
 	}
+}
+
+func (h *HealthChecker) Stop(ctx context.Context) error {
+	if h.server == nil {
+		return nil
+	}
+	return h.server.Shutdown(ctx)
 }
 
 func (h *HealthChecker) handleHealth(w http.ResponseWriter, r *http.Request) {

@@ -20,6 +20,7 @@ import (
 type Gateway struct {
 	grpcAddr string
 	logger   *zap.Logger
+	handler  http.Handler
 }
 
 func New(grpcAddr string, logger *zap.Logger) *Gateway {
@@ -29,7 +30,7 @@ func New(grpcAddr string, logger *zap.Logger) *Gateway {
 	}
 }
 
-func (g *Gateway) Start(ctx context.Context, port int) error {
+func (g *Gateway) Init(ctx context.Context) error {
 	mux := runtime.NewServeMux(
 		runtime.WithIncomingHeaderMatcher(customMatcher),
 		runtime.WithErrorHandler(customErrorHandler),
@@ -53,15 +54,23 @@ func (g *Gateway) Start(ctx context.Context, port int) error {
 		return fmt.Errorf("register chat handler: %w", err)
 	}
 
-	handler := middleware.CompressionMiddleware(
+	g.handler = middleware.CompressionMiddleware(
 		corsMiddleware(
 			loggingMiddleware(mux, g.logger),
 		),
 	)
 
+	return nil
+}
+
+func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	g.handler.ServeHTTP(w, r)
+}
+
+func (g *Gateway) Start(ctx context.Context, port int) error {
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
-		Handler:      handler,
+		Handler:      g,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -140,4 +149,8 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (g *Gateway) Shutdown(ctx context.Context) error {
+	return nil
 }

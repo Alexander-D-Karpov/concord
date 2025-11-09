@@ -71,9 +71,10 @@ func TestAuthAPI(t *testing.T) {
 
 func TestRoomsAPI(t *testing.T) {
 	database := testutil.GetDB(t)
+	aside := testutil.GetAside(t)
 
 	logger, _ := logging.Init("info", "json", "stdout", false, "")
-	eventsHub := events.NewHub(logger, database.Pool)
+	eventsHub := events.NewHub(logger, database.Pool, aside)
 
 	usersRepo := users.NewRepository(database.Pool)
 	roomsRepo := rooms.NewRepository(database.Pool)
@@ -85,7 +86,7 @@ func TestRoomsAPI(t *testing.T) {
 	}
 	require.NoError(t, usersRepo.Create(context.Background(), user))
 
-	roomsService := rooms.NewService(roomsRepo, eventsHub)
+	roomsService := rooms.NewService(roomsRepo, eventsHub, aside)
 	handler := rooms.NewHandler(roomsService)
 
 	ctx := interceptor.ContextWithAuth(context.Background(), user.ID.String(), user.Handle, nil)

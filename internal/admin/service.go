@@ -50,6 +50,8 @@ func (s *Service) KickUser(ctx context.Context, adminUserID, roomID, targetUserI
 		return err
 	}
 
+	s.hub.NotifyRoomLeave(targetUserID, roomID)
+
 	s.hub.BroadcastToRoom(roomID, &streamv1.ServerEvent{
 		EventId:   uuid.New().String(),
 		CreatedAt: timestamppb.Now(),
@@ -113,6 +115,8 @@ func (s *Service) BanUser(ctx context.Context, adminUserID, roomID, targetUserID
 	if err := s.roomsRepo.RemoveMember(ctx, roomUUID, targetUUID); err != nil {
 		s.logger.Warn("failed to remove member during ban", zap.Error(err))
 	}
+
+	s.hub.NotifyRoomLeave(targetUserID, roomID)
 
 	s.hub.BroadcastToRoom(roomID, &streamv1.ServerEvent{
 		EventId:   uuid.New().String(),

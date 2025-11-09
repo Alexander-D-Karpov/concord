@@ -8,17 +8,21 @@ import (
 	"github.com/Alexander-D-Karpov/concord/internal/common/errors"
 	"github.com/Alexander-D-Karpov/concord/internal/common/logging"
 	"github.com/Alexander-D-Karpov/concord/internal/events"
+	"github.com/Alexander-D-Karpov/concord/internal/users"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
 type Handler struct {
 	streamv1.UnimplementedStreamServiceServer
-	hub *events.Hub
+	hub       *events.Hub
+	usersRepo *users.Repository
 }
 
-func NewHandler(hub *events.Hub) *Handler {
+func NewHandler(hub *events.Hub, usersRepo *users.Repository) *Handler {
 	return &Handler{
-		hub: hub,
+		hub:       hub,
+		usersRepo: usersRepo,
 	}
 }
 
@@ -31,8 +35,28 @@ func (h *Handler) EventStream(stream streamv1.StreamService_EventStreamServer) e
 		return errors.ToGRPCError(errors.Unauthorized("user not authenticated"))
 	}
 
-	h.hub.AddClient(userID, stream)
-	defer h.hub.RemoveClient(userID)
+	userUUID, err := uuid.Parse(userID)
+	if err != nil {
+		return errors.ToGRPCError(errors.BadRequest("invalid user id"))
+	}
+
+	if err := h.usersRepo.UpdateStatus(ctx, userUUID, "online"); err != nil {
+		logger.Warn("failed to set user online", zap.Error(err))
+	}
+
+	logger.Info("adding client to hub", zap.String("user_id", userID))
+	client := h.hub.AddClient(userID, stream)
+	if client == nil {
+		return errors.ToGRPCError(errors.Internal("failed to add client", nil))
+	}
+
+	defer func() {
+		logger.Info("removing client from hub", zap.String("user_id", userID))
+		h.hub.RemoveClient(userID)
+		if err := h.usersRepo.UpdateStatus(ctx, userUUID, "offline"); err != nil {
+			logger.Warn("failed to set user offline", zap.Error(err))
+		}
+	}()
 
 	logger.Info("stream connection established", zap.String("user_id", userID))
 
@@ -42,10 +66,12 @@ func (h *Handler) EventStream(stream streamv1.StreamService_EventStreamServer) e
 		for {
 			clientEvent, err := stream.Recv()
 			if err == io.EOF {
+				logger.Info("client closed stream", zap.String("user_id", userID))
 				errChan <- nil
 				return
 			}
 			if err != nil {
+				logger.Error("stream recv error", zap.String("user_id", userID), zap.Error(err))
 				errChan <- err
 				return
 			}
@@ -61,7 +87,7 @@ func (h *Handler) EventStream(stream streamv1.StreamService_EventStreamServer) e
 		}
 		return err
 	case <-ctx.Done():
-		logger.Info("stream connection closed", zap.String("user_id", userID))
+		logger.Info("stream context cancelled", zap.String("user_id", userID))
 		return ctx.Err()
 	}
 }

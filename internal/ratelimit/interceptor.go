@@ -2,11 +2,13 @@ package ratelimit
 
 import (
 	"context"
+	"strings"
 
 	"github.com/Alexander-D-Karpov/concord/internal/auth/interceptor"
-	"github.com/Alexander-D-Karpov/concord/internal/common/errors"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 type Interceptor struct {
@@ -32,11 +34,7 @@ func (i *Interceptor) Unary() grpc.UnaryServerInterceptor {
 		}
 
 		if !allowed {
-			return nil, errors.ToGRPCError(errors.NewAppError(
-				429,
-				"rate limit exceeded",
-				nil,
-			))
+			return nil, status.Error(codes.ResourceExhausted, "rate limit exceeded, please try again later")
 		}
 
 		return handler(ctx, req)
@@ -59,11 +57,7 @@ func (i *Interceptor) Stream() grpc.StreamServerInterceptor {
 		}
 
 		if !allowed {
-			return errors.ToGRPCError(errors.NewAppError(
-				429,
-				"rate limit exceeded",
-				nil,
-			))
+			return status.Error(codes.ResourceExhausted, "rate limit exceeded, please try again later")
 		}
 
 		return handler(srv, ss)
@@ -73,6 +67,15 @@ func (i *Interceptor) Stream() grpc.StreamServerInterceptor {
 func (i *Interceptor) getKey(ctx context.Context, method string) string {
 	userID := interceptor.GetUserID(ctx)
 	if userID != "" {
+		if strings.Contains(method, "Auth") {
+			return "auth"
+		}
+		if strings.Contains(method, "Message") || strings.Contains(method, "Chat") {
+			return "message"
+		}
+		if strings.Contains(method, "Upload") {
+			return "upload"
+		}
 		return "user:" + userID
 	}
 

@@ -107,5 +107,29 @@ func ToGRPCError(err error) error {
 		return appErr.GRPCStatus().Err()
 	}
 
+	if st, ok := status.FromError(err); ok {
+		return st.Err()
+	}
+
 	return status.Error(codes.Internal, err.Error())
+}
+
+func IsNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var appErr *AppError
+	if errors.As(err, &appErr) {
+		if appErr.Code == codes.NotFound {
+			return true
+		}
+		return errors.Is(appErr.Err, ErrNotFound)
+	}
+
+	if st, ok := status.FromError(err); ok {
+		return st.Code() == codes.NotFound
+	}
+
+	return errors.Is(err, ErrNotFound)
 }
