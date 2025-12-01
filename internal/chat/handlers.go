@@ -62,13 +62,45 @@ func (h *Handler) SendMessage(ctx context.Context, req *chatv1.SendMessageReques
 		attachments = append(attachments, attachment)
 	}
 
-	msg, err := h.service.SendMessage(ctx, req.RoomId, req.Content, req.ReplyToId, attachments)
+	msg, err := h.service.SendMessage(ctx, req.RoomId, req.Content, req.ReplyToId, attachments, req.MentionUserIds)
 	if err != nil {
 		return nil, errors.ToGRPCError(err)
 	}
 
 	return &chatv1.SendMessageResponse{
 		Message: messageToProto(msg),
+	}, nil
+}
+
+func (h *Handler) SearchMessages(ctx context.Context, req *chatv1.SearchMessagesRequest) (*chatv1.SearchMessagesResponse, error) {
+	if req.Query == "" {
+		return nil, errors.ToGRPCError(errors.BadRequest("query is required"))
+	}
+
+	limit := int(req.Limit)
+	if limit <= 0 {
+		limit = 50
+	}
+
+	var roomID string
+	if req.RoomId != "" {
+		roomID = req.RoomId
+	} else {
+		return nil, errors.ToGRPCError(errors.BadRequest("room_id is required for search"))
+	}
+
+	messages, err := h.service.SearchMessages(ctx, roomID, req.Query, limit)
+	if err != nil {
+		return nil, errors.ToGRPCError(err)
+	}
+
+	protoMessages := make([]*commonv1.Message, len(messages))
+	for i, msg := range messages {
+		protoMessages[i] = messageToProto(msg)
+	}
+
+	return &chatv1.SearchMessagesResponse{
+		Messages: protoMessages,
 	}, nil
 }
 
@@ -131,12 +163,6 @@ func (h *Handler) ListMessages(ctx context.Context, req *chatv1.ListMessagesRequ
 	return &chatv1.ListMessagesResponse{
 		Messages: protoMessages,
 		HasMore:  len(messages) == limit,
-	}, nil
-}
-
-func (h *Handler) SearchMessages(ctx context.Context, req *chatv1.SearchMessagesRequest) (*chatv1.SearchMessagesResponse, error) {
-	return &chatv1.SearchMessagesResponse{
-		Messages: []*commonv1.Message{},
 	}, nil
 }
 
@@ -293,6 +319,12 @@ func messageToProto(msg *Message) *commonv1.Message {
 		}
 	}
 	protoMsg.Attachments = attachments
+
+	mentions := make([]string, len(msg.Mentions))
+	for i, m := range msg.Mentions {
+		mentions[i] = m.String()
+	}
+	protoMsg.Mentions = mentions
 
 	return protoMsg
 }

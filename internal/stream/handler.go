@@ -1,7 +1,9 @@
 package stream
 
 import (
+	"context"
 	"io"
+	"time"
 
 	streamv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/stream/v1"
 	"github.com/Alexander-D-Karpov/concord/internal/auth/interceptor"
@@ -11,6 +13,8 @@ import (
 	"github.com/Alexander-D-Karpov/concord/internal/users"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type Handler struct {
@@ -53,8 +57,15 @@ func (h *Handler) EventStream(stream streamv1.StreamService_EventStreamServer) e
 	defer func() {
 		logger.Info("removing client from hub", zap.String("user_id", userID))
 		h.hub.RemoveClient(userID)
-		if err := h.usersRepo.UpdateStatus(ctx, userUUID, "offline"); err != nil {
-			logger.Warn("failed to set user offline", zap.Error(err))
+
+		dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := h.usersRepo.UpdateStatus(dbCtx, userUUID, "offline"); err != nil {
+			logger.Warn("failed to set user offline",
+				zap.String("user_id", userID),
+				zap.Error(err),
+			)
 		}
 	}()
 
@@ -71,7 +82,19 @@ func (h *Handler) EventStream(stream streamv1.StreamService_EventStreamServer) e
 				return
 			}
 			if err != nil {
-				logger.Error("stream recv error", zap.String("user_id", userID), zap.Error(err))
+				st, ok := status.FromError(err)
+				if ok && (st.Code() == codes.Canceled || st.Code() == codes.DeadlineExceeded) {
+					logger.Info("stream recv cancelled",
+						zap.String("user_id", userID),
+						zap.String("reason", st.Message()),
+					)
+					return
+				}
+
+				logger.Error("stream recv error",
+					zap.String("user_id", userID),
+					zap.Error(err),
+				)
 				errChan <- err
 				return
 			}

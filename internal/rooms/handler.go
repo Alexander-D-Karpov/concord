@@ -61,7 +61,26 @@ func (h *Handler) UpdateRoom(ctx context.Context, req *roomsv1.UpdateRoomRequest
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id is required"))
 	}
 
-	room, err := h.service.UpdateRoom(ctx, req.RoomId, req.Name, req.Description, req.IsPrivate)
+	var namePtr *string
+	var descPtr *string
+	var privatePtr *bool
+
+	if req.Name != nil {
+		v := req.Name.Value
+		namePtr = &v
+	}
+
+	if req.Description != nil {
+		v := req.Description.Value
+		descPtr = &v
+	}
+
+	if req.IsPrivate != nil {
+		v := req.IsPrivate.Value
+		privatePtr = &v
+	}
+
+	room, err := h.service.UpdateRoom(ctx, req.RoomId, namePtr, descPtr, privatePtr)
 	if err != nil {
 		return nil, errors.ToGRPCError(err)
 	}

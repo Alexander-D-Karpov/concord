@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	commonv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/common/v1"
 	streamv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/stream/v1"
 	"github.com/Alexander-D-Karpov/concord/internal/auth/interceptor"
 	"github.com/Alexander-D-Karpov/concord/internal/common/errors"
@@ -13,6 +14,8 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+const roleAdmin = "admin"
 
 type Service struct {
 	repo  *Repository
@@ -58,7 +61,7 @@ func (s *Service) CreateRoom(ctx context.Context, name string, voiceServerID *st
 		return nil, err
 	}
 
-	if err := s.repo.AddMember(ctx, room.ID, creatorID, "admin"); err != nil {
+	if err := s.repo.AddMember(ctx, room.ID, creatorID, roleAdmin); err != nil {
 		return nil, err
 	}
 
@@ -87,10 +90,42 @@ func (s *Service) GetRoom(ctx context.Context, roomID string) (*Room, error) {
 		return nil, errors.BadRequest("invalid room id")
 	}
 
-	return s.repo.GetByID(ctx, id)
+	room, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	userID := interceptor.GetUserID(ctx)
+	if userID == "" {
+		return nil, errors.Unauthorized("user not authenticated")
+	}
+
+	userUUID, err := uuid.Parse(userID)
+	if err != nil {
+		return nil, errors.BadRequest("invalid user id")
+	}
+
+	// Only members can access private rooms
+	if room.IsPrivate {
+		isMember, err := s.repo.IsMember(ctx, id, userUUID)
+		if err != nil {
+			return nil, err
+		}
+		if !isMember {
+			return nil, errors.Forbidden("only room members can access this room")
+		}
+	}
+
+	return room, nil
 }
 
-func (s *Service) UpdateRoom(ctx context.Context, roomID, name, description string, isPrivate bool) (*Room, error) {
+func (s *Service) UpdateRoom(
+	ctx context.Context,
+	roomID string,
+	name *string,
+	description *string,
+	isPrivate *bool,
+) (*Room, error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
 		return nil, errors.Unauthorized("user not authenticated")
@@ -111,7 +146,7 @@ func (s *Service) UpdateRoom(ctx context.Context, roomID, name, description stri
 		return nil, err
 	}
 
-	if member.Role != "admin" {
+	if member.Role != roleAdmin {
 		return nil, errors.Forbidden("only admins can update rooms")
 	}
 
@@ -120,26 +155,56 @@ func (s *Service) UpdateRoom(ctx context.Context, roomID, name, description stri
 		return nil, err
 	}
 
-	if name != "" {
-		room.Name = name
+	if name != nil {
+		if *name == "" {
+			return nil, errors.BadRequest("name cannot be empty")
+		}
+		room.Name = *name
 	}
 
-	if description != "" {
-		room.Description = &description
+	// description: presence → update; empty string → clear
+	if description != nil {
+		if *description == "" {
+			room.Description = nil
+		} else {
+			desc := *description
+			room.Description = &desc
+		}
 	}
 
-	room.IsPrivate = isPrivate
+	if isPrivate != nil {
+		room.IsPrivate = *isPrivate
+	}
 
 	if err := s.repo.Update(ctx, room); err != nil {
 		return nil, err
 	}
 
 	if s.hub != nil {
+		protoRoom := &commonv1.Room{
+			Id:        room.ID.String(),
+			Name:      room.Name,
+			CreatedBy: room.CreatedBy.String(),
+			CreatedAt: timestamppb.New(room.CreatedAt),
+			IsPrivate: room.IsPrivate,
+		}
+		if room.VoiceServerID != nil {
+			protoRoom.VoiceServerId = room.VoiceServerID.String()
+		}
+		if room.Region != nil {
+			protoRoom.Region = *room.Region
+		}
+		if room.Description != nil {
+			protoRoom.Description = *room.Description
+		}
+
 		s.hub.BroadcastToRoom(roomID, &streamv1.ServerEvent{
 			EventId:   uuid.New().String(),
 			CreatedAt: timestamppb.Now(),
 			Payload: &streamv1.ServerEvent_RoomUpdated{
-				RoomUpdated: &streamv1.RoomUpdated{},
+				RoomUpdated: &streamv1.RoomUpdated{
+					Room: protoRoom,
+				},
 			},
 		})
 	}
@@ -174,6 +239,19 @@ func (s *Service) DeleteRoom(ctx context.Context, roomID string) error {
 
 	members, err := s.repo.ListMembers(ctx, roomUUID)
 	if err == nil && s.hub != nil {
+		deleteEvent := &streamv1.ServerEvent{
+			EventId:   uuid.New().String(),
+			CreatedAt: timestamppb.Now(),
+			Payload: &streamv1.ServerEvent_RoomDeleted{
+				RoomDeleted: &streamv1.RoomDeleted{
+					RoomId:    roomID,
+					DeletedBy: userID,
+				},
+			},
+		}
+
+		s.hub.BroadcastToRoom(roomID, deleteEvent)
+
 		for _, member := range members {
 			s.hub.NotifyRoomLeave(member.UserID.String(), roomID)
 			if s.cache != nil {
@@ -223,7 +301,7 @@ func (s *Service) AttachVoiceServer(ctx context.Context, roomID, serverID string
 		return nil, err
 	}
 
-	if member.Role != "admin" {
+	if member.Role != roleAdmin {
 		return nil, errors.Forbidden("only admins can attach voice servers")
 	}
 

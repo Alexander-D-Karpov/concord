@@ -6,6 +6,7 @@ import (
 	commonv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/common/v1"
 	membershipv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/membership/v1"
 	"github.com/Alexander-D-Karpov/concord/internal/common/errors"
+	"github.com/Alexander-D-Karpov/concord/internal/rooms"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -20,20 +21,78 @@ func NewHandler(service *Service) *Handler {
 	}
 }
 
-func (h *Handler) Invite(ctx context.Context, req *membershipv1.InviteRequest) (*commonv1.Member, error) {
-	if req.RoomId == "" || req.UserId == "" {
-		return nil, errors.ToGRPCError(errors.BadRequest("room_id and user_id are required"))
+func (h *Handler) Invite(ctx context.Context, req *membershipv1.InviteRequest) (*membershipv1.RoomInvite, error) {
+	if req.RoomId == "" {
+		return nil, errors.ToGRPCError(errors.BadRequest("room_id is required"))
+	}
+	if req.UserId == "" {
+		return nil, errors.ToGRPCError(errors.BadRequest("user_id is required"))
 	}
 
-	if err := h.service.Invite(ctx, req.RoomId, req.UserId); err != nil {
+	invite, err := h.service.CreateRoomInvite(ctx, req.RoomId, req.UserId)
+	if err != nil {
 		return nil, errors.ToGRPCError(err)
 	}
 
-	return &commonv1.Member{
-		UserId:   req.UserId,
-		RoomId:   req.RoomId,
-		Role:     commonv1.Role_ROLE_MEMBER,
-		JoinedAt: timestamppb.Now(),
+	return toProtoRoomInvite(invite), nil
+}
+
+func (h *Handler) AcceptRoomInvite(ctx context.Context, req *membershipv1.AcceptRoomInviteRequest) (*commonv1.Member, error) {
+	if req.InviteId == "" {
+		return nil, errors.ToGRPCError(errors.BadRequest("invite_id is required"))
+	}
+
+	member, err := h.service.AcceptRoomInvite(ctx, req.InviteId)
+	if err != nil {
+		return nil, errors.ToGRPCError(err)
+	}
+
+	return toProtoMember(member), nil
+}
+
+func (h *Handler) RejectRoomInvite(ctx context.Context, req *membershipv1.RejectRoomInviteRequest) (*membershipv1.EmptyResponse, error) {
+	if req.InviteId == "" {
+		return nil, errors.ToGRPCError(errors.BadRequest("invite_id is required"))
+	}
+
+	if err := h.service.RejectRoomInvite(ctx, req.InviteId); err != nil {
+		return nil, errors.ToGRPCError(err)
+	}
+
+	return &membershipv1.EmptyResponse{}, nil
+}
+
+func (h *Handler) CancelRoomInvite(ctx context.Context, req *membershipv1.CancelRoomInviteRequest) (*membershipv1.EmptyResponse, error) {
+	if req.InviteId == "" {
+		return nil, errors.ToGRPCError(errors.BadRequest("invite_id is required"))
+	}
+
+	if err := h.service.CancelRoomInvite(ctx, req.InviteId); err != nil {
+		return nil, errors.ToGRPCError(err)
+	}
+
+	return &membershipv1.EmptyResponse{}, nil
+}
+
+func (h *Handler) ListRoomInvites(ctx context.Context, req *membershipv1.ListRoomInvitesRequest) (*membershipv1.ListRoomInvitesResponse, error) {
+	incoming, outgoing, err := h.service.ListRoomInvites(ctx)
+	if err != nil {
+		return nil, errors.ToGRPCError(err)
+	}
+
+	protoIncoming := make([]*membershipv1.RoomInvite, len(incoming))
+	for i, inv := range incoming {
+		protoIncoming[i] = toProtoRoomInvite(inv)
+	}
+
+	protoOutgoing := make([]*membershipv1.RoomInvite, len(outgoing))
+	for i, inv := range outgoing {
+		protoOutgoing[i] = toProtoRoomInvite(inv)
+	}
+
+	return &membershipv1.ListRoomInvitesResponse{
+		Incoming: protoIncoming,
+		Outgoing: protoOutgoing,
 	}, nil
 }
 
@@ -80,13 +139,7 @@ func (h *Handler) SetNickname(ctx context.Context, req *membershipv1.SetNickname
 		return nil, errors.ToGRPCError(err)
 	}
 
-	return &commonv1.Member{
-		UserId:   member.UserID.String(),
-		RoomId:   member.RoomID.String(),
-		Role:     stringToRole(member.Role),
-		JoinedAt: timestamppb.New(member.JoinedAt),
-		Nickname: req.Nickname,
-	}, nil
+	return toProtoMember(member), nil
 }
 
 func (h *Handler) ListMembers(ctx context.Context, req *membershipv1.ListMembersRequest) (*membershipv1.ListMembersResponse, error) {
@@ -101,18 +154,59 @@ func (h *Handler) ListMembers(ctx context.Context, req *membershipv1.ListMembers
 
 	protoMembers := make([]*commonv1.Member, len(members))
 	for i, member := range members {
-		protoMembers[i] = &commonv1.Member{
-			UserId:   member.UserID.String(),
-			RoomId:   member.RoomID.String(),
-			Role:     stringToRole(member.Role),
-			JoinedAt: timestamppb.New(member.JoinedAt),
-			Nickname: member.Nickname,
-		}
+		protoMembers[i] = toProtoMember(member)
 	}
 
 	return &membershipv1.ListMembersResponse{
 		Members: protoMembers,
 	}, nil
+}
+
+func toProtoRoomInvite(inv *RoomInviteWithUsers) *membershipv1.RoomInvite {
+	status := membershipv1.RoomInviteStatus_ROOM_INVITE_STATUS_PENDING
+	switch inv.Status {
+	case "accepted":
+		status = membershipv1.RoomInviteStatus_ROOM_INVITE_STATUS_ACCEPTED
+	case "rejected":
+		status = membershipv1.RoomInviteStatus_ROOM_INVITE_STATUS_REJECTED
+	}
+
+	return &membershipv1.RoomInvite{
+		Id:                     inv.ID.String(),
+		RoomId:                 inv.RoomID.String(),
+		RoomName:               inv.RoomName,
+		InvitedUserId:          inv.InvitedUserID.String(),
+		InvitedBy:              inv.InvitedBy.String(),
+		Status:                 status,
+		CreatedAt:              timestamppb.New(inv.CreatedAt),
+		UpdatedAt:              timestamppb.New(inv.UpdatedAt),
+		InvitedUserHandle:      inv.InvitedUserHandle,
+		InvitedUserDisplayName: inv.InvitedUserDisplayName,
+		InvitedUserAvatarUrl:   inv.InvitedUserAvatarURL,
+		InviterHandle:          inv.InviterHandle,
+		InviterDisplayName:     inv.InviterDisplayName,
+		InviterAvatarUrl:       inv.InviterAvatarURL,
+	}
+}
+
+func toProtoMember(m *rooms.Member) *commonv1.Member {
+	if m == nil {
+		return nil
+	}
+
+	var nickname string
+	if m.Nickname != nil {
+		nickname = *m.Nickname
+	}
+
+	return &commonv1.Member{
+		RoomId:   m.RoomID.String(),
+		UserId:   m.UserID.String(),
+		Role:     stringToRole(m.Role),
+		Nickname: nickname,
+		Status:   m.Status,
+		JoinedAt: timestamppb.New(m.JoinedAt),
+	}
 }
 
 func roleToString(role commonv1.Role) string {

@@ -2,49 +2,29 @@ package voiceassign
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/Alexander-D-Karpov/concord/internal/auth/jwt"
-	"github.com/Alexander-D-Karpov/concord/internal/common/errors"
-	"github.com/Alexander-D-Karpov/concord/internal/voice/crypto"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-type VoiceServer struct {
-	ID        uuid.UUID
-	Name      string
-	Region    string
-	AddrUDP   string
-	AddrCtrl  string
-	Status    string
-	LoadScore float64
-}
 
 type Service struct {
 	pool       *pgxpool.Pool
 	jwtManager *jwt.Manager
 }
 
-type Assignment struct {
-	Host         string
-	Port         uint32
-	ServerID     string
-	Token        string
-	KeyID        []byte
-	KeyMaterial  []byte
-	NonceBase    []byte
-	Participants []ParticipantInfo
-}
-
-type ParticipantInfo struct {
-	UserID       string
-	SSRC         uint32
-	Muted        bool
-	VideoEnabled bool
+type VoiceAssignment struct {
+	ServerID    string
+	Host        string
+	Port        uint32
+	Token       string
+	KeyID       []byte
+	KeyMaterial []byte
+	NonceBase   []byte
 }
 
 func NewService(pool *pgxpool.Pool, jwtManager *jwt.Manager) *Service {
@@ -54,128 +34,82 @@ func NewService(pool *pgxpool.Pool, jwtManager *jwt.Manager) *Service {
 	}
 }
 
-func (s *Service) SelectServerForRoom(ctx context.Context, roomID string, region *string) (*VoiceServer, error) {
-	query := `
-		SELECT id, name, region, addr_udp, addr_ctrl, status, load_score
-		FROM voice_servers
-		WHERE status = 'online'
-	`
-	args := []interface{}{}
-
-	if region != nil && *region != "" {
-		query += " AND region = $1"
-		args = append(args, *region)
+func (s *Service) AssignVoiceServer(ctx context.Context, userID, roomID string) (*VoiceAssignment, error) {
+	roomUUID, err := uuid.Parse(roomID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid room_id: %w", err)
 	}
 
-	query += " ORDER BY load_score ASC LIMIT 1"
+	var serverID uuid.UUID
+	var addrUDP string
 
-	var server VoiceServer
-	err := s.pool.QueryRow(ctx, query, args...).Scan(
-		&server.ID,
-		&server.Name,
-		&server.Region,
-		&server.AddrUDP,
-		&server.AddrCtrl,
-		&server.Status,
-		&server.LoadScore,
-	)
+	err = s.pool.QueryRow(ctx, `
+		SELECT vs.id, vs.addr_udp
+		FROM voice_servers vs
+		LEFT JOIN rooms r ON r.voice_server_id = vs.id
+		WHERE (r.id = $1 OR r.voice_server_id IS NULL)
+		AND vs.status = 'online'
+		ORDER BY 
+			CASE WHEN r.voice_server_id = vs.id THEN 0 ELSE 1 END,
+			vs.load_score ASC
+		LIMIT 1
+	`, roomUUID).Scan(&serverID, &addrUDP)
+
+	if err == pgx.ErrNoRows {
+		err = s.pool.QueryRow(ctx, `
+			SELECT id, addr_udp
+			FROM voice_servers
+			WHERE status = 'online'
+			ORDER BY load_score ASC
+			LIMIT 1
+		`).Scan(&serverID, &addrUDP)
+	}
 
 	if err != nil {
-		return nil, errors.NotFound("no available voice servers")
+		return nil, fmt.Errorf("no available voice server: %w", err)
 	}
 
-	return &server, nil
-}
+	host, port := parseUDPAddr(addrUDP)
 
-func (s *Service) IssueJoinToken(userID, roomID, serverID string, duration time.Duration) (string, []byte, error) {
-	token, err := s.jwtManager.GenerateVoiceToken(userID, roomID, serverID, duration)
+	voiceToken, err := s.jwtManager.GenerateVoiceToken(userID, roomID, serverID.String(), 5*time.Minute)
 	if err != nil {
-		return "", nil, err
+		return nil, fmt.Errorf("failed to generate voice token: %w", err)
 	}
 
-	key, err := crypto.GenerateKey()
-	if err != nil {
-		return "", nil, err
+	keyID := make([]byte, 4)
+	keyMaterial := make([]byte, 32)
+	nonceBase := make([]byte, 12)
+
+	if _, err := rand.Read(keyID); err != nil {
+		return nil, fmt.Errorf("failed to generate key_id: %w", err)
+	}
+	if _, err := rand.Read(keyMaterial); err != nil {
+		return nil, fmt.Errorf("failed to generate key_material: %w", err)
+	}
+	if _, err := rand.Read(nonceBase); err != nil {
+		return nil, fmt.Errorf("failed to generate nonce_base: %w", err)
 	}
 
-	return token, key, nil
-}
-
-func (s *Service) GetServerByID(ctx context.Context, serverID string) (*VoiceServer, error) {
-	id, err := uuid.Parse(serverID)
-	if err != nil {
-		return nil, errors.BadRequest("invalid server id")
-	}
-
-	query := `
-		SELECT id, name, region, addr_udp, addr_ctrl, status, load_score
-		FROM voice_servers
-		WHERE id = $1
-	`
-
-	var server VoiceServer
-	err = s.pool.QueryRow(ctx, query, id).Scan(
-		&server.ID,
-		&server.Name,
-		&server.Region,
-		&server.AddrUDP,
-		&server.AddrCtrl,
-		&server.Status,
-		&server.LoadScore,
-	)
-
-	if err != nil {
-		return nil, errors.NotFound("voice server not found")
-	}
-
-	return &server, nil
-}
-
-func (s *Service) AssignVoiceServer(ctx context.Context, userID, roomID string) (*Assignment, error) {
-	server, err := s.SelectServerForRoom(ctx, roomID, nil)
-	if err != nil {
-		return nil, fmt.Errorf("select server: %w", err)
-	}
-
-	token, keyMaterial, err := s.IssueJoinToken(userID, roomID, server.ID.String(), 5*time.Minute)
-	if err != nil {
-		return nil, fmt.Errorf("issue token: %w", err)
-	}
-
-	keyID, err := crypto.GenerateKey()
-	if err != nil {
-		return nil, fmt.Errorf("generate key ID: %w", err)
-	}
-
-	nonceBase, err := crypto.GenerateNonceBase()
-	if err != nil {
-		return nil, fmt.Errorf("generate nonce base: %w", err)
-	}
-
-	host, portStr := parseAddr(server.AddrUDP)
-	port := uint32(0)
-	if p, err := strconv.ParseUint(portStr, 10, 32); err == nil {
-		port = uint32(p)
-	}
-
-	participants := []ParticipantInfo{}
-
-	return &Assignment{
-		Host:         host,
-		Port:         port,
-		ServerID:     server.ID.String(),
-		Token:        token,
-		KeyID:        keyID[:16],
-		KeyMaterial:  keyMaterial,
-		NonceBase:    nonceBase,
-		Participants: participants,
+	return &VoiceAssignment{
+		ServerID:    serverID.String(),
+		Host:        host,
+		Port:        port,
+		Token:       voiceToken,
+		KeyID:       keyID,
+		KeyMaterial: keyMaterial,
+		NonceBase:   nonceBase,
 	}, nil
 }
 
-func parseAddr(addr string) (string, string) {
-	parts := strings.Split(addr, ":")
-	if len(parts) != 2 {
-		return addr, "50000"
+func parseUDPAddr(addr string) (string, uint32) {
+	var host string
+	var port uint32
+
+	_, err := fmt.Sscanf(addr, "%[^:]:%d", &host, &port)
+	if err != nil {
+		host = addr
+		port = 50000
 	}
-	return parts[0], parts[1]
+
+	return host, port
 }

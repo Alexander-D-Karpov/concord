@@ -81,6 +81,34 @@ func (s *Service) UpdateProfile(ctx context.Context, displayName, avatarURL, bio
 		return nil, err
 	}
 
+	if s.hub != nil {
+		friends, err := s.getFriendsList(ctx, id)
+		if err == nil {
+			bioStr := ""
+			if user.Bio != nil {
+				bioStr = *user.Bio
+			}
+
+			profileEvent := &streamv1.ServerEvent{
+				EventId:   uuid.New().String(),
+				CreatedAt: timestamppb.Now(),
+				Payload: &streamv1.ServerEvent_ProfileUpdated{
+					ProfileUpdated: &streamv1.ProfileUpdated{
+						UserId:      userID,
+						DisplayName: user.DisplayName,
+						AvatarUrl:   user.AvatarURL,
+						Status:      user.Status,
+						Bio:         bioStr,
+					},
+				},
+			}
+
+			for _, friendID := range friends {
+				s.hub.BroadcastToUser(friendID.String(), profileEvent)
+			}
+		}
+	}
+
 	return user, nil
 }
 
@@ -107,17 +135,19 @@ func (s *Service) UpdateStatus(ctx context.Context, status string) (*User, error
 	if s.hub != nil {
 		friends, err := s.getFriendsList(ctx, id)
 		if err == nil {
-			for _, friendID := range friends {
-				s.hub.BroadcastToRoom(friendID.String(), &streamv1.ServerEvent{
-					EventId:   uuid.New().String(),
-					CreatedAt: timestamppb.Now(),
-					Payload: &streamv1.ServerEvent_UserStatusChanged{
-						UserStatusChanged: &streamv1.UserStatusChanged{
-							UserId: userID,
-							Status: status,
-						},
+			statusEvent := &streamv1.ServerEvent{
+				EventId:   uuid.New().String(),
+				CreatedAt: timestamppb.Now(),
+				Payload: &streamv1.ServerEvent_UserStatusChanged{
+					UserStatusChanged: &streamv1.UserStatusChanged{
+						UserId: userID,
+						Status: status,
 					},
-				})
+				},
+			}
+
+			for _, friendID := range friends {
+				s.hub.BroadcastToUser(friendID.String(), statusEvent)
 			}
 		}
 	}

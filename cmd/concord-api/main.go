@@ -10,9 +10,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Alexander-D-Karpov/concord/internal/security"
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
 
 	adminv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/admin/v1"
@@ -237,12 +239,26 @@ func run() error {
 		authInterceptor.Stream(),
 	}
 
-	grpcServer := grpc.NewServer(
+	serverOpts := []grpc.ServerOption{
 		grpc.ChainUnaryInterceptor(interceptors...),
 		grpc.ChainStreamInterceptor(streamInterceptors...),
-		grpc.MaxRecvMsgSize(16*1024*1024),
-		grpc.MaxSendMsgSize(16*1024*1024),
-	)
+		grpc.MaxRecvMsgSize(16 * 1024 * 1024),
+		grpc.MaxSendMsgSize(16 * 1024 * 1024),
+	}
+
+	if cfg.Server.TLSCertFile != "" && cfg.Server.TLSKeyFile != "" {
+		tlsCfg, err := security.ServerTLSConfig(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
+		if err != nil {
+			return fmt.Errorf("init TLS: %w", err)
+		}
+
+		serverOpts = append(serverOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
+		logger.Info("gRPC server TLS enabled",
+			zap.String("cert", cfg.Server.TLSCertFile),
+		)
+	}
+
+	grpcServer := grpc.NewServer(serverOpts...)
 
 	authv1.RegisterAuthServiceServer(grpcServer, authHandler)
 	usersv1.RegisterUsersServiceServer(grpcServer, usersHandler)

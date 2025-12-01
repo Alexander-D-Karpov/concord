@@ -7,6 +7,7 @@ option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/stream/v1;
 import "google/protobuf/timestamp.proto";
 import "common/v1/types.proto";
 import "friends/v1/friends.proto";
+import "membership/v1/membership.proto";
 
 message Ack {
   string event_id = 1;
@@ -111,6 +112,47 @@ message FriendRequestUpdated {
   concord.friends.v1.FriendRequest request = 1;
 }
 
+message RoomDeleted {
+  string room_id = 1;
+  string deleted_by = 2;
+}
+
+message FriendRemoved {
+  string user_id = 1;
+  string removed_by = 2;
+}
+
+message UserBlocked {
+  string blocker_id = 1;
+}
+
+message UserUnblocked {
+  string unblocker_id = 1;
+}
+
+message ProfileUpdated {
+  string user_id = 1;
+  string display_name = 2;
+  string avatar_url = 3;
+  string status = 4;
+  string bio = 5;
+}
+
+message RoomInviteReceived {
+  string room_id = 1;
+  string room_name = 2;
+  string invited_by = 3;
+  string inviter_display_name = 4;
+}
+
+message RoomInviteCreated {
+  membership.v1.RoomInvite invite = 1;
+}
+
+message RoomInviteUpdated {
+  membership.v1.RoomInvite invite = 1;
+}
+
 message ServerEvent {
   string event_id = 1;
   google.protobuf.Timestamp created_at = 2;
@@ -128,11 +170,19 @@ message ServerEvent {
     VoiceStateChanged voice_state_changed = 30;
     RoomUpdated room_updated = 40;
     RoleChanged role_changed = 41;
+    RoomDeleted room_deleted = 42;
+    RoomInviteReceived room_invite_received = 43;
     UserStatusChanged user_status_changed = 50;
+    ProfileUpdated profile_updated = 51;
     VoiceUserJoined voice_user_joined = 60;
     VoiceUserLeft voice_user_left = 61;
     FriendRequestCreated friend_request_created = 70;
     FriendRequestUpdated friend_request_updated = 71;
+    FriendRemoved friend_removed = 72;
+    UserBlocked user_blocked = 73;
+    UserUnblocked user_unblocked = 74;
+    RoomInviteCreated room_invite_created = 80;
+    RoomInviteUpdated room_invite_updated = 81;
   }
 }
 

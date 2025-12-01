@@ -24,6 +24,7 @@ type Message struct {
 	Pinned      bool
 	Reactions   []Reaction
 	Attachments []Attachment
+	Mentions    []uuid.UUID
 }
 
 type Reaction struct {
@@ -153,6 +154,11 @@ func (r *Repository) GetByID(ctx context.Context, id int64) (*Message, error) {
 	}
 
 	msg.Attachments, err = r.GetAttachments(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	msg.Mentions, err = r.GetMentions(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -540,4 +546,93 @@ func (r *Repository) GetThreadReplies(ctx context.Context, parentID int64, limit
 
 func timePtr(t time.Time) *time.Time {
 	return &t
+}
+
+func (r *Repository) Search(ctx context.Context, roomID uuid.UUID, query string, limit int) ([]*Message, error) {
+	sqlQuery := `
+		SELECT m.id, m.room_id, m.author_id, m.content, m.created_at, m.edited_at, m.deleted_at,
+		       m.reply_to_id, m.reply_count,
+		       COALESCE((SELECT true FROM pinned_messages WHERE message_id = m.id), false) as pinned
+		FROM messages m
+		WHERE m.room_id = $1 
+		AND m.deleted_at IS NULL
+		AND m.content ILIKE '%' || $2 || '%'
+		ORDER BY m.created_at DESC
+		LIMIT $3
+	`
+
+	rows, err := r.pool.Query(ctx, sqlQuery, roomID, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []*Message
+	for rows.Next() {
+		msg := &Message{}
+		if err := rows.Scan(
+			&msg.ID,
+			&msg.RoomID,
+			&msg.AuthorID,
+			&msg.Content,
+			&msg.CreatedAt,
+			&msg.EditedAt,
+			&msg.DeletedAt,
+			&msg.ReplyToID,
+			&msg.ReplyCount,
+			&msg.Pinned,
+		); err != nil {
+			return nil, err
+		}
+
+		msg.Reactions, _ = r.GetReactions(ctx, msg.ID)
+		msg.Attachments, _ = r.GetAttachments(ctx, msg.ID)
+
+		messages = append(messages, msg)
+	}
+
+	return messages, rows.Err()
+}
+
+func (r *Repository) CreateMentions(ctx context.Context, messageID int64, userIDs []uuid.UUID) error {
+	if len(userIDs) == 0 {
+		return nil
+	}
+
+	query := `
+		INSERT INTO message_mentions (message_id, user_id)
+		VALUES ($1, $2)
+		ON CONFLICT DO NOTHING
+	`
+
+	for _, userID := range userIDs {
+		if _, err := r.pool.Exec(ctx, query, messageID, userID); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (r *Repository) GetMentions(ctx context.Context, messageID int64) ([]uuid.UUID, error) {
+	query := `
+		SELECT user_id FROM message_mentions WHERE message_id = $1
+	`
+
+	rows, err := r.pool.Query(ctx, query, messageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var userIDs []uuid.UUID
+	for rows.Next() {
+		var userID uuid.UUID
+		if err := rows.Scan(&userID); err != nil {
+			return nil, err
+		}
+		userIDs = append(userIDs, userID)
+	}
+
+	return userIDs, rows.Err()
 }

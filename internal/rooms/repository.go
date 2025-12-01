@@ -26,12 +26,40 @@ type Member struct {
 	RoomID   uuid.UUID
 	UserID   uuid.UUID
 	Role     string
-	Nickname string
 	JoinedAt time.Time
+	Nickname *string
+	Status   string
 }
 
 type Repository struct {
 	pool *pgxpool.Pool
+}
+
+type RoomInvite struct {
+	ID            uuid.UUID
+	RoomID        uuid.UUID
+	InvitedUserID uuid.UUID
+	InvitedBy     uuid.UUID
+	Status        string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+type RoomInviteWithUsers struct {
+	ID                     uuid.UUID
+	RoomID                 uuid.UUID
+	RoomName               string
+	InvitedUserID          uuid.UUID
+	InvitedBy              uuid.UUID
+	Status                 string
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	InvitedUserHandle      string
+	InvitedUserDisplayName string
+	InvitedUserAvatarURL   string
+	InviterHandle          string
+	InviterDisplayName     string
+	InviterAvatarURL       string
 }
 
 func NewRepository(pool *pgxpool.Pool) *Repository {
@@ -205,9 +233,16 @@ func (r *Repository) RemoveMember(ctx context.Context, roomID, userID uuid.UUID)
 
 func (r *Repository) GetMember(ctx context.Context, roomID, userID uuid.UUID) (*Member, error) {
 	query := `
-		SELECT room_id, user_id, role, COALESCE(nickname, '') as nickname, joined_at
-		FROM memberships
-		WHERE room_id = $1 AND user_id = $2
+		SELECT 
+			m.room_id,
+			m.user_id,
+			m.role,
+			m.joined_at,
+			m.nickname,
+			u.status
+		FROM memberships m
+		JOIN users u ON u.id = m.user_id
+		WHERE m.room_id = $1 AND m.user_id = $2
 	`
 
 	member := &Member{}
@@ -215,8 +250,9 @@ func (r *Repository) GetMember(ctx context.Context, roomID, userID uuid.UUID) (*
 		&member.RoomID,
 		&member.UserID,
 		&member.Role,
-		&member.Nickname,
 		&member.JoinedAt,
+		&member.Nickname,
+		&member.Status,
 	)
 
 	if err == pgx.ErrNoRows {
@@ -231,11 +267,18 @@ func (r *Repository) GetMember(ctx context.Context, roomID, userID uuid.UUID) (*
 
 func (r *Repository) ListMembers(ctx context.Context, roomID uuid.UUID) ([]*Member, error) {
 	query := `
-		SELECT room_id, user_id, role, COALESCE(nickname, '') as nickname, joined_at
-		FROM memberships
-		WHERE room_id = $1
-		ORDER BY joined_at ASC
-	`
+        SELECT
+            m.user_id,
+            m.room_id,
+            m.role,
+            m.joined_at,
+            m.nickname,
+            u.status
+        FROM memberships m
+        JOIN users u ON u.id = m.user_id
+        WHERE m.room_id = $1
+        ORDER BY u.display_name ASC
+    `
 
 	rows, err := r.pool.Query(ctx, query, roomID)
 	if err != nil {
@@ -245,17 +288,18 @@ func (r *Repository) ListMembers(ctx context.Context, roomID uuid.UUID) ([]*Memb
 
 	var members []*Member
 	for rows.Next() {
-		member := &Member{}
+		m := &Member{}
 		if err := rows.Scan(
-			&member.RoomID,
-			&member.UserID,
-			&member.Role,
-			&member.Nickname,
-			&member.JoinedAt,
+			&m.UserID,
+			&m.RoomID,
+			&m.Role,
+			&m.JoinedAt,
+			&m.Nickname,
+			&m.Status,
 		); err != nil {
 			return nil, err
 		}
-		members = append(members, member)
+		members = append(members, m)
 	}
 
 	return members, rows.Err()
@@ -297,4 +341,248 @@ func (r *Repository) UpdateMemberNickname(ctx context.Context, roomID, userID uu
 	}
 
 	return nil
+}
+
+func (r *Repository) Pool() *pgxpool.Pool {
+	return r.pool
+}
+
+func (r *Repository) CreateRoomInvite(ctx context.Context, roomID, invitedUserID, invitedBy uuid.UUID) (*RoomInvite, error) {
+	query := `
+		INSERT INTO room_invites (room_id, invited_user_id, invited_by, status)
+		VALUES ($1, $2, $3, 'pending')
+		RETURNING id, room_id, invited_user_id, invited_by, status, created_at, updated_at
+	`
+
+	inv := &RoomInvite{}
+	err := r.pool.QueryRow(ctx, query, roomID, invitedUserID, invitedBy).Scan(
+		&inv.ID,
+		&inv.RoomID,
+		&inv.InvitedUserID,
+		&inv.InvitedBy,
+		&inv.Status,
+		&inv.CreatedAt,
+		&inv.UpdatedAt,
+	)
+
+	return inv, err
+}
+
+func (r *Repository) GetRoomInvite(ctx context.Context, id uuid.UUID) (*RoomInvite, error) {
+	query := `
+		SELECT id, room_id, invited_user_id, invited_by, status, created_at, updated_at
+		FROM room_invites
+		WHERE id = $1
+	`
+
+	inv := &RoomInvite{}
+	err := r.pool.QueryRow(ctx, query, id).Scan(
+		&inv.ID,
+		&inv.RoomID,
+		&inv.InvitedUserID,
+		&inv.InvitedBy,
+		&inv.Status,
+		&inv.CreatedAt,
+		&inv.UpdatedAt,
+	)
+
+	if err == pgx.ErrNoRows {
+		return nil, errors.NotFound("room invite not found")
+	}
+
+	return inv, err
+}
+
+func (r *Repository) GetRoomInviteWithUsers(ctx context.Context, id uuid.UUID) (*RoomInviteWithUsers, error) {
+	query := `
+		SELECT 
+			ri.id, ri.room_id, r.name as room_name, ri.invited_user_id, ri.invited_by, 
+			ri.status, ri.created_at, ri.updated_at,
+			u_invited.handle, u_invited.display_name, u_invited.avatar_url,
+			u_inviter.handle, u_inviter.display_name, u_inviter.avatar_url
+		FROM room_invites ri
+		INNER JOIN rooms r ON ri.room_id = r.id
+		INNER JOIN users u_invited ON ri.invited_user_id = u_invited.id
+		INNER JOIN users u_inviter ON ri.invited_by = u_inviter.id
+		WHERE ri.id = $1
+	`
+
+	inv := &RoomInviteWithUsers{}
+	err := r.pool.QueryRow(ctx, query, id).Scan(
+		&inv.ID,
+		&inv.RoomID,
+		&inv.RoomName,
+		&inv.InvitedUserID,
+		&inv.InvitedBy,
+		&inv.Status,
+		&inv.CreatedAt,
+		&inv.UpdatedAt,
+		&inv.InvitedUserHandle,
+		&inv.InvitedUserDisplayName,
+		&inv.InvitedUserAvatarURL,
+		&inv.InviterHandle,
+		&inv.InviterDisplayName,
+		&inv.InviterAvatarURL,
+	)
+
+	if err == pgx.ErrNoRows {
+		return nil, errors.NotFound("room invite not found")
+	}
+
+	return inv, err
+}
+
+func (r *Repository) UpdateRoomInviteStatus(ctx context.Context, id uuid.UUID, status string) error {
+	query := `
+		UPDATE room_invites
+		SET status = $2, updated_at = NOW()
+		WHERE id = $1
+	`
+
+	result, err := r.pool.Exec(ctx, query, id, status)
+	if err != nil {
+		return err
+	}
+
+	if result.RowsAffected() == 0 {
+		return errors.NotFound("room invite not found")
+	}
+
+	return nil
+}
+
+func (r *Repository) GetRoomInviteBetweenUsers(ctx context.Context, roomID, invitedUserID uuid.UUID) (*RoomInvite, error) {
+	query := `
+		SELECT id, room_id, invited_user_id, invited_by, status, created_at, updated_at
+		FROM room_invites
+		WHERE room_id = $1 AND invited_user_id = $2 AND status = 'pending'
+		ORDER BY created_at DESC
+		LIMIT 1
+	`
+
+	inv := &RoomInvite{}
+	err := r.pool.QueryRow(ctx, query, roomID, invitedUserID).Scan(
+		&inv.ID,
+		&inv.RoomID,
+		&inv.InvitedUserID,
+		&inv.InvitedBy,
+		&inv.Status,
+		&inv.CreatedAt,
+		&inv.UpdatedAt,
+	)
+
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+
+	return inv, err
+}
+
+func (r *Repository) ListIncomingRoomInvitesWithUsers(ctx context.Context, userID uuid.UUID) ([]*RoomInviteWithUsers, error) {
+	query := `
+		SELECT 
+			ri.id, ri.room_id, r.name as room_name, ri.invited_user_id, ri.invited_by, 
+			ri.status, ri.created_at, ri.updated_at,
+			u_invited.handle, u_invited.display_name, u_invited.avatar_url,
+			u_inviter.handle, u_inviter.display_name, u_inviter.avatar_url
+		FROM room_invites ri
+		INNER JOIN rooms r ON ri.room_id = r.id
+		INNER JOIN users u_invited ON ri.invited_user_id = u_invited.id
+		INNER JOIN users u_inviter ON ri.invited_by = u_inviter.id
+		WHERE ri.invited_user_id = $1 AND ri.status = 'pending'
+		ORDER BY ri.created_at DESC
+	`
+
+	rows, err := r.pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var invites []*RoomInviteWithUsers
+	for rows.Next() {
+		inv := &RoomInviteWithUsers{}
+		if err := rows.Scan(
+			&inv.ID,
+			&inv.RoomID,
+			&inv.RoomName,
+			&inv.InvitedUserID,
+			&inv.InvitedBy,
+			&inv.Status,
+			&inv.CreatedAt,
+			&inv.UpdatedAt,
+			&inv.InvitedUserHandle,
+			&inv.InvitedUserDisplayName,
+			&inv.InvitedUserAvatarURL,
+			&inv.InviterHandle,
+			&inv.InviterDisplayName,
+			&inv.InviterAvatarURL,
+		); err != nil {
+			return nil, err
+		}
+		invites = append(invites, inv)
+	}
+
+	return invites, rows.Err()
+}
+
+func (r *Repository) ListOutgoingRoomInvitesWithUsers(ctx context.Context, userID uuid.UUID) ([]*RoomInviteWithUsers, error) {
+	query := `
+		SELECT 
+			ri.id, ri.room_id, r.name as room_name, ri.invited_user_id, ri.invited_by, 
+			ri.status, ri.created_at, ri.updated_at,
+			u_invited.handle, u_invited.display_name, u_invited.avatar_url,
+			u_inviter.handle, u_inviter.display_name, u_inviter.avatar_url
+		FROM room_invites ri
+		INNER JOIN rooms r ON ri.room_id = r.id
+		INNER JOIN users u_invited ON ri.invited_user_id = u_invited.id
+		INNER JOIN users u_inviter ON ri.invited_by = u_inviter.id
+		WHERE ri.invited_by = $1 AND ri.status = 'pending'
+		ORDER BY ri.created_at DESC
+	`
+
+	rows, err := r.pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var invites []*RoomInviteWithUsers
+	for rows.Next() {
+		inv := &RoomInviteWithUsers{}
+		if err := rows.Scan(
+			&inv.ID,
+			&inv.RoomID,
+			&inv.RoomName,
+			&inv.InvitedUserID,
+			&inv.InvitedBy,
+			&inv.Status,
+			&inv.CreatedAt,
+			&inv.UpdatedAt,
+			&inv.InvitedUserHandle,
+			&inv.InvitedUserDisplayName,
+			&inv.InvitedUserAvatarURL,
+			&inv.InviterHandle,
+			&inv.InviterDisplayName,
+			&inv.InviterAvatarURL,
+		); err != nil {
+			return nil, err
+		}
+		invites = append(invites, inv)
+	}
+
+	return invites, rows.Err()
+}
+
+func (r *Repository) IsMember(ctx context.Context, roomID, userID uuid.UUID) (bool, error) {
+	query := `
+		SELECT EXISTS(
+			SELECT 1 FROM memberships 
+			WHERE room_id = $1 AND user_id = $2
+		)
+	`
+
+	var exists bool
+	err := r.pool.QueryRow(ctx, query, roomID, userID).Scan(&exists)
+	return exists, err
 }

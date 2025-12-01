@@ -5,6 +5,7 @@ package concord.membership.v1;
 option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/membership/v1;membershipv1";
 
 import "common/v1/types.proto";
+import "google/protobuf/timestamp.proto";
 
 message InviteRequest {
   string room_id = 1;
@@ -37,8 +38,56 @@ message ListMembersResponse {
 
 message EmptyResponse {}
 
+enum RoomInviteStatus {
+  ROOM_INVITE_STATUS_UNSPECIFIED = 0;
+  ROOM_INVITE_STATUS_PENDING = 1;
+  ROOM_INVITE_STATUS_ACCEPTED = 2;
+  ROOM_INVITE_STATUS_REJECTED = 3;
+}
+
+message RoomInvite {
+  string id = 1;
+  string room_id = 2;
+  string room_name = 3;
+  string invited_user_id = 4;
+  string invited_by = 5;
+  RoomInviteStatus status = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp updated_at = 8;
+  // Populated user info
+  string invited_user_handle = 9;
+  string invited_user_display_name = 10;
+  string invited_user_avatar_url = 11;
+  string inviter_handle = 12;
+  string inviter_display_name = 13;
+  string inviter_avatar_url = 14;
+}
+
+message AcceptRoomInviteRequest {
+  string invite_id = 1;
+}
+
+message RejectRoomInviteRequest {
+  string invite_id = 1;
+}
+
+message CancelRoomInviteRequest {
+  string invite_id = 1;
+}
+
+message ListRoomInvitesRequest {}
+
+message ListRoomInvitesResponse {
+  repeated RoomInvite incoming = 1;
+  repeated RoomInvite outgoing = 2;
+}
+
 service MembershipService {
-  rpc Invite(InviteRequest) returns (concord.common.v1.Member);
+  rpc Invite(InviteRequest) returns (RoomInvite);
+  rpc AcceptRoomInvite(AcceptRoomInviteRequest) returns (concord.common.v1.Member);
+  rpc RejectRoomInvite(RejectRoomInviteRequest) returns (EmptyResponse);
+  rpc CancelRoomInvite(CancelRoomInviteRequest) returns (EmptyResponse);
+  rpc ListRoomInvites(ListRoomInvitesRequest) returns (ListRoomInvitesResponse);
   rpc Remove(RemoveRequest) returns (EmptyResponse);
   rpc SetRole(SetRoleRequest) returns (concord.common.v1.Member);
   rpc SetNickname(SetNicknameRequest) returns (concord.common.v1.Member);

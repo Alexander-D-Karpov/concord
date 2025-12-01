@@ -40,6 +40,7 @@ message Member {
   Role role = 3;
   google.protobuf.Timestamp joined_at = 4;
   string nickname = 5;
+  string status = 6; 
 }
 
 message VoiceServer {

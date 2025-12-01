@@ -14,6 +14,7 @@ import (
 	"github.com/Alexander-D-Karpov/concord/internal/infra/cache"
 	"github.com/Alexander-D-Karpov/concord/internal/rooms"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -23,6 +24,11 @@ type Service struct {
 	roomsRepo *rooms.Repository
 	cache     *cache.AsidePattern
 }
+
+const (
+	MaxMessageContentLength  = 10000
+	MaxAttachmentsPerMessage = 10
+)
 
 func NewService(repo *Repository, roomsRepo *rooms.Repository, hub *events.Hub, aside *cache.AsidePattern) *Service {
 	return &Service{
@@ -65,91 +71,6 @@ func (s *Service) isMember(ctx context.Context, roomID, userID uuid.UUID) (bool,
 		return false, err
 	}
 	return true, nil
-}
-
-func (s *Service) SendMessage(ctx context.Context, roomID, content, replyToID string, attachments []Attachment) (*Message, error) {
-	userID := interceptor.GetUserID(ctx)
-	if userID == "" {
-		return nil, errors.Unauthorized("user not authenticated")
-	}
-
-	roomUUID, err := uuid.Parse(roomID)
-	if err != nil {
-		return nil, errors.BadRequest("invalid room id")
-	}
-	authorUUID, err := uuid.Parse(userID)
-	if err != nil {
-		return nil, errors.BadRequest("invalid user id")
-	}
-
-	ok, err := s.isMember(ctx, roomUUID, authorUUID)
-	if err != nil {
-		return nil, errors.Internal("membership check failed", err)
-	}
-	if !ok {
-		return nil, errors.Forbidden("not a room member")
-	}
-
-	msg := &Message{
-		RoomID:      roomUUID,
-		AuthorID:    authorUUID,
-		Content:     content,
-		Attachments: attachments,
-	}
-
-	if replyToID != "" {
-		replyID, err := parseMessageID(replyToID)
-		if err != nil {
-			return nil, errors.BadRequest("invalid reply_to_id")
-		}
-		msg.ReplyToID = &replyID
-	}
-
-	if err := s.repo.Create(ctx, msg); err != nil {
-		return nil, err
-	}
-
-	if msg.ReplyToID != nil {
-		if err := s.repo.IncrementReplyCount(ctx, *msg.ReplyToID); err != nil {
-			return nil, err
-		}
-	}
-
-	protoAttachments := make([]*commonv1.MessageAttachment, len(msg.Attachments))
-	for i, att := range msg.Attachments {
-		protoAttachments[i] = &commonv1.MessageAttachment{
-			Id:          att.ID.String(),
-			Url:         att.URL,
-			Filename:    att.Filename,
-			ContentType: att.ContentType,
-			Size:        att.Size,
-			Width:       int32(att.Width),
-			Height:      int32(att.Height),
-			CreatedAt:   timestamppb.New(att.CreatedAt),
-		}
-	}
-
-	if s.hub != nil {
-		go s.hub.BroadcastToRoom(roomID, &streamv1.ServerEvent{
-			EventId:   uuid.New().String(),
-			CreatedAt: timestamppb.Now(),
-			Payload: &streamv1.ServerEvent_MessageCreated{
-				MessageCreated: &streamv1.MessageCreated{
-					Message: &commonv1.Message{
-						Id:          strconv.FormatInt(msg.ID, 10),
-						RoomId:      msg.RoomID.String(),
-						AuthorId:    msg.AuthorID.String(),
-						Content:     msg.Content,
-						CreatedAt:   timestamppb.New(msg.CreatedAt),
-						ReplyToId:   replyToID,
-						Attachments: protoAttachments,
-					},
-				},
-			},
-		})
-	}
-
-	return msg, nil
 }
 
 func (s *Service) EditMessage(ctx context.Context, messageID, content string) (*Message, error) {
@@ -286,23 +207,25 @@ func (s *Service) AddReaction(ctx context.Context, messageID, emoji string) erro
 		return err
 	}
 
-	go s.hub.BroadcastToRoom(msg.RoomID.String(), &streamv1.ServerEvent{
-		EventId:   uuid.New().String(),
-		CreatedAt: timestamppb.Now(),
-		Payload: &streamv1.ServerEvent_MessageReactionAdded{
-			MessageReactionAdded: &streamv1.MessageReactionAdded{
-				MessageId: messageID,
-				RoomId:    msg.RoomID.String(),
-				Reaction: &commonv1.MessageReaction{
-					Id:        reaction.ID.String(),
+	if s.hub != nil {
+		go s.hub.BroadcastToRoom(msg.RoomID.String(), &streamv1.ServerEvent{
+			EventId:   uuid.New().String(),
+			CreatedAt: timestamppb.Now(),
+			Payload: &streamv1.ServerEvent_MessageReactionAdded{
+				MessageReactionAdded: &streamv1.MessageReactionAdded{
 					MessageId: messageID,
-					UserId:    userID,
-					Emoji:     emoji,
-					CreatedAt: timestamppb.New(reaction.CreatedAt),
+					RoomId:    msg.RoomID.String(),
+					Reaction: &commonv1.MessageReaction{
+						Id:        reaction.ID.String(),
+						MessageId: messageID,
+						UserId:    userID,
+						Emoji:     emoji,
+						CreatedAt: timestamppb.New(reaction.CreatedAt),
+					},
 				},
 			},
-		},
-	})
+		})
+	}
 
 	return nil
 }
@@ -333,18 +256,20 @@ func (s *Service) RemoveReaction(ctx context.Context, messageID, emoji string) e
 		return err
 	}
 
-	go s.hub.BroadcastToRoom(msg.RoomID.String(), &streamv1.ServerEvent{
-		EventId:   uuid.New().String(),
-		CreatedAt: timestamppb.Now(),
-		Payload: &streamv1.ServerEvent_MessageReactionRemoved{
-			MessageReactionRemoved: &streamv1.MessageReactionRemoved{
-				MessageId:  messageID,
-				RoomId:     msg.RoomID.String(),
-				ReactionId: reactionID.String(),
-				UserId:     userID,
+	if s.hub != nil {
+		go s.hub.BroadcastToRoom(msg.RoomID.String(), &streamv1.ServerEvent{
+			EventId:   uuid.New().String(),
+			CreatedAt: timestamppb.Now(),
+			Payload: &streamv1.ServerEvent_MessageReactionRemoved{
+				MessageReactionRemoved: &streamv1.MessageReactionRemoved{
+					MessageId:  messageID,
+					RoomId:     msg.RoomID.String(),
+					ReactionId: reactionID.String(),
+					UserId:     userID,
+				},
 			},
-		},
-	})
+		})
+	}
 
 	return nil
 }
@@ -462,4 +387,133 @@ func (s *Service) GetThread(ctx context.Context, parentMessageID string, limit i
 
 func parseMessageID(id string) (int64, error) {
 	return strconv.ParseInt(id, 10, 64)
+}
+
+func (s *Service) SearchMessages(ctx context.Context, roomID, query string, limit int) ([]*Message, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+
+	roomUUID, err := uuid.Parse(roomID)
+	if err != nil {
+		return nil, errors.BadRequest("invalid room id")
+	}
+
+	return s.repo.Search(ctx, roomUUID, query, limit)
+}
+
+func (s *Service) SendMessage(ctx context.Context, roomID, content, replyToID string, attachments []Attachment, mentionUserIDs []string) (*Message, error) {
+	userID := interceptor.GetUserID(ctx)
+	if userID == "" {
+		return nil, errors.Unauthorized("user not authenticated")
+	}
+
+	if len(content) > MaxMessageContentLength {
+		return nil, errors.BadRequest("message content too large")
+	}
+
+	if len(attachments) > MaxAttachmentsPerMessage {
+		return nil, errors.BadRequest("too many attachments")
+	}
+
+	roomUUID, err := uuid.Parse(roomID)
+	if err != nil {
+		return nil, errors.BadRequest("invalid room id")
+	}
+	authorUUID, err := uuid.Parse(userID)
+	if err != nil {
+		return nil, errors.BadRequest("invalid user id")
+	}
+
+	ok, err := s.isMember(ctx, roomUUID, authorUUID)
+	if err != nil {
+		return nil, errors.Internal("membership check failed", err)
+	}
+	if !ok {
+		return nil, errors.Forbidden("not a room member")
+	}
+
+	msg := &Message{
+		RoomID:      roomUUID,
+		AuthorID:    authorUUID,
+		Content:     content,
+		Attachments: attachments,
+	}
+
+	if replyToID != "" {
+		replyID, err := parseMessageID(replyToID)
+		if err != nil {
+			return nil, errors.BadRequest("invalid reply_to_id")
+		}
+		msg.ReplyToID = &replyID
+	}
+
+	if err := s.repo.Create(ctx, msg); err != nil {
+		return nil, err
+	}
+
+	if len(mentionUserIDs) > 0 {
+		var mentionUUIDs []uuid.UUID
+		for _, id := range mentionUserIDs {
+			if uid, err := uuid.Parse(id); err == nil {
+				mentionUUIDs = append(mentionUUIDs, uid)
+			}
+		}
+		if err := s.repo.CreateMentions(ctx, msg.ID, mentionUUIDs); err != nil {
+			return nil, err
+		}
+		msg.Mentions = mentionUUIDs
+	}
+
+	if msg.ReplyToID != nil {
+		if err := s.repo.IncrementReplyCount(ctx, *msg.ReplyToID); err != nil {
+			return nil, err
+		}
+	}
+
+	protoAttachments := make([]*commonv1.MessageAttachment, len(msg.Attachments))
+	for i, att := range msg.Attachments {
+		protoAttachments[i] = &commonv1.MessageAttachment{
+			Id:          att.ID.String(),
+			Url:         att.URL,
+			Filename:    att.Filename,
+			ContentType: att.ContentType,
+			Size:        att.Size,
+			Width:       int32(att.Width),
+			Height:      int32(att.Height),
+			CreatedAt:   timestamppb.New(att.CreatedAt),
+		}
+	}
+
+	if s.hub != nil {
+		event := &streamv1.ServerEvent{
+			EventId:   uuid.New().String(),
+			CreatedAt: timestamppb.Now(),
+			Payload: &streamv1.ServerEvent_MessageCreated{
+				MessageCreated: &streamv1.MessageCreated{
+					Message: &commonv1.Message{
+						Id:          strconv.FormatInt(msg.ID, 10),
+						RoomId:      msg.RoomID.String(),
+						AuthorId:    msg.AuthorID.String(),
+						Content:     msg.Content,
+						CreatedAt:   timestamppb.New(msg.CreatedAt),
+						ReplyToId:   replyToID,
+						Attachments: protoAttachments,
+						Mentions:    mentionUserIDs,
+					},
+				},
+			},
+		}
+
+		s.hub.Logger().Debug("broadcasting message event",
+			zap.String("event_id", event.GetEventId()),
+			zap.String("room_id", roomID),
+			zap.Int("content_length", len(msg.Content)),
+			zap.Int("attachments_count", len(msg.Attachments)),
+		)
+
+		go s.hub.BroadcastToRoom(roomID, event)
+	}
+
+	return msg, nil
 }

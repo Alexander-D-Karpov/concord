@@ -283,8 +283,8 @@ def run_tests():
             predicate=lambda e: e.member_joined.member.room_id == room_id and e.member_joined.member.user_id == u2.id
         )
         assert ev.member_joined.member.user_id == u2.id
-    except TimeoutError as te:
-        log(f"ACTION fallback: no member_joined to A, polling membership")
+    except TimeoutError:
+        log("ACTION fallback: no member_joined to A, polling membership")
     finally:
         c1.wait_until(
             "B appears in room members (server-side truth)",
@@ -321,14 +321,12 @@ def run_tests():
 
     fr = c1.send_friend_request(u2.id)
 
-    saw_friend_created = False
     try:
         _ = c2.wait_for_event(
             "friend_request_created",
             timeout=1.5,
             predicate=lambda e: e.friend_request_created.request.id == fr.request.id
         )
-        saw_friend_created = True
     except TimeoutError:
         log("INFO: friend_request_created event not received by B; will validate via ListPending")
 

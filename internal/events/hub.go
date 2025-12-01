@@ -52,9 +52,8 @@ func (h *Hub) Logger() *zap.Logger {
 
 func (h *Hub) AddClient(userID string, stream streamv1.StreamService_EventStreamServer) *Client {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	if h.shutdown {
+		h.mu.Unlock()
 		h.logger.Warn("rejecting new client during shutdown", zap.String("user_id", userID))
 		return nil
 	}
@@ -75,9 +74,25 @@ func (h *Hub) AddClient(userID string, stream streamv1.StreamService_EventStream
 
 	go client.writePump(h.logger)
 
+	h.mu.Unlock()
+
 	userUUID, err := uuid.Parse(userID)
 	if err == nil {
-		go h.autoSubscribeUserRooms(context.Background(), client, userUUID)
+		subscriptionCtx, subscriptionCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer subscriptionCancel()
+
+		done := make(chan struct{})
+		go func() {
+			h.autoSubscribeUserRooms(subscriptionCtx, client, userUUID)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			h.logger.Info("auto-subscription completed synchronously", zap.String("user_id", userID))
+		case <-subscriptionCtx.Done():
+			h.logger.Warn("auto-subscription timeout, continuing in background", zap.String("user_id", userID))
+		}
 	} else {
 		h.logger.Error("failed to parse user ID for auto-subscribe", zap.String("user_id", userID), zap.Error(err))
 	}
@@ -155,15 +170,26 @@ func (h *Hub) autoSubscribeUserRooms(ctx context.Context, client *Client, userID
 	}
 
 	if len(roomIDs) == 0 {
-		h.logger.Warn("no rooms found for user", zap.String("user_id", userID.String()))
+		h.logger.Info("no rooms found for user", zap.String("user_id", userID.String()))
 		return
 	}
 
 	successCount := 0
 	for _, rid := range roomIDs {
+		select {
+		case <-ctx.Done():
+			h.logger.Warn("auto-subscribe context cancelled",
+				zap.String("user_id", client.UserID),
+				zap.Int("subscribed", successCount),
+				zap.Int("total", len(roomIDs)),
+			)
+			return
+		default:
+		}
+
 		if h.Subscribe(client.UserID, rid) {
 			successCount++
-			h.logger.Info("auto-subscribed to room",
+			h.logger.Debug("auto-subscribed to room",
 				zap.String("user_id", client.UserID),
 				zap.String("room_id", rid),
 			)

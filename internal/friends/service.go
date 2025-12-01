@@ -92,6 +92,7 @@ func (s *Service) SendFriendRequest(ctx context.Context, toUserID string) (*Frie
 
 	if s.hub != nil {
 		s.hub.BroadcastToUser(toUserID, &streamv1.ServerEvent{
+			EventId:   uuid.New().String(),
 			CreatedAt: timestamppb.Now(),
 			Payload: &streamv1.ServerEvent_FriendRequestCreated{
 				FriendRequestCreated: &streamv1.FriendRequestCreated{
@@ -113,6 +114,29 @@ func (s *Service) SendFriendRequest(ctx context.Context, toUserID string) (*Frie
 			},
 		})
 	}
+
+	s.hub.BroadcastToUser(fromUserID, &streamv1.ServerEvent{
+		EventId:   uuid.New().String(),
+		CreatedAt: timestamppb.Now(),
+		Payload: &streamv1.ServerEvent_FriendRequestCreated{
+			FriendRequestCreated: &streamv1.FriendRequestCreated{
+				Request: &friendsv1.FriendRequest{
+					Id:              request.ID.String(),
+					FromUserId:      fromUserID,
+					ToUserId:        toUserID,
+					Status:          friendsv1.FriendRequestStatus_FRIEND_REQUEST_STATUS_PENDING,
+					CreatedAt:       timestamppb.New(request.CreatedAt),
+					UpdatedAt:       timestamppb.New(request.UpdatedAt),
+					FromHandle:      fromUser.Handle,
+					FromDisplayName: fromUser.DisplayName,
+					FromAvatarUrl:   fromUser.AvatarURL,
+					ToHandle:        toUser.Handle,
+					ToDisplayName:   toUser.DisplayName,
+					ToAvatarUrl:     toUser.AvatarURL,
+				},
+			},
+		},
+	})
 
 	return request, fromUser, toUser, nil
 }
@@ -150,14 +174,35 @@ func (s *Service) AcceptFriendRequest(ctx context.Context, requestID string) err
 	}
 
 	if s.hub != nil {
-		req.Status = "accepted"
-		req.UpdatedAt = time.Now()
+		fromUser, _ := s.usersRepo.GetByID(ctx, req.FromUserID)
+		toUser, _ := s.usersRepo.GetByID(ctx, req.ToUserID)
+
+		protoRequest := &friendsv1.FriendRequest{
+			Id:         req.ID.String(),
+			FromUserId: req.FromUserID.String(),
+			ToUserId:   req.ToUserID.String(),
+			Status:     friendsv1.FriendRequestStatus_FRIEND_REQUEST_STATUS_ACCEPTED,
+			CreatedAt:  timestamppb.New(req.CreatedAt),
+			UpdatedAt:  timestamppb.Now(),
+		}
+
+		if fromUser != nil {
+			protoRequest.FromHandle = fromUser.Handle
+			protoRequest.FromDisplayName = fromUser.DisplayName
+			protoRequest.FromAvatarUrl = fromUser.AvatarURL
+		}
+		if toUser != nil {
+			protoRequest.ToHandle = toUser.Handle
+			protoRequest.ToDisplayName = toUser.DisplayName
+			protoRequest.ToAvatarUrl = toUser.AvatarURL
+		}
 
 		ev := &streamv1.ServerEvent{
+			EventId:   uuid.New().String(),
 			CreatedAt: timestamppb.Now(),
 			Payload: &streamv1.ServerEvent_FriendRequestUpdated{
 				FriendRequestUpdated: &streamv1.FriendRequestUpdated{
-					Request: toProtoFriendRequest(req),
+					Request: protoRequest,
 				},
 			},
 		}
@@ -196,13 +241,35 @@ func (s *Service) RejectFriendRequest(ctx context.Context, requestID string) err
 	}
 
 	if s.hub != nil {
-		req.Status = "rejected"
-		req.UpdatedAt = time.Now()
+		fromUser, _ := s.usersRepo.GetByID(ctx, req.FromUserID)
+		toUser, _ := s.usersRepo.GetByID(ctx, req.ToUserID)
+
+		protoRequest := &friendsv1.FriendRequest{
+			Id:         req.ID.String(),
+			FromUserId: req.FromUserID.String(),
+			ToUserId:   req.ToUserID.String(),
+			Status:     friendsv1.FriendRequestStatus_FRIEND_REQUEST_STATUS_REJECTED,
+			CreatedAt:  timestamppb.New(req.CreatedAt),
+			UpdatedAt:  timestamppb.Now(),
+		}
+
+		if fromUser != nil {
+			protoRequest.FromHandle = fromUser.Handle
+			protoRequest.FromDisplayName = fromUser.DisplayName
+			protoRequest.FromAvatarUrl = fromUser.AvatarURL
+		}
+		if toUser != nil {
+			protoRequest.ToHandle = toUser.Handle
+			protoRequest.ToDisplayName = toUser.DisplayName
+			protoRequest.ToAvatarUrl = toUser.AvatarURL
+		}
+
 		ev := &streamv1.ServerEvent{
+			EventId:   uuid.New().String(),
 			CreatedAt: timestamppb.Now(),
 			Payload: &streamv1.ServerEvent_FriendRequestUpdated{
 				FriendRequestUpdated: &streamv1.FriendRequestUpdated{
-					Request: toProtoFriendRequest(req),
+					Request: protoRequest,
 				},
 			},
 		}
@@ -242,13 +309,35 @@ func (s *Service) CancelFriendRequest(ctx context.Context, requestID string) err
 	}
 
 	if s.hub != nil {
-		req.Status = "rejected"
-		req.UpdatedAt = time.Now()
+		fromUser, _ := s.usersRepo.GetByID(ctx, req.FromUserID)
+		toUser, _ := s.usersRepo.GetByID(ctx, req.ToUserID)
+
+		protoRequest := &friendsv1.FriendRequest{
+			Id:         req.ID.String(),
+			FromUserId: req.FromUserID.String(),
+			ToUserId:   req.ToUserID.String(),
+			Status:     friendsv1.FriendRequestStatus_FRIEND_REQUEST_STATUS_REJECTED,
+			CreatedAt:  timestamppb.New(req.CreatedAt),
+			UpdatedAt:  timestamppb.Now(),
+		}
+
+		if fromUser != nil {
+			protoRequest.FromHandle = fromUser.Handle
+			protoRequest.FromDisplayName = fromUser.DisplayName
+			protoRequest.FromAvatarUrl = fromUser.AvatarURL
+		}
+		if toUser != nil {
+			protoRequest.ToHandle = toUser.Handle
+			protoRequest.ToDisplayName = toUser.DisplayName
+			protoRequest.ToAvatarUrl = toUser.AvatarURL
+		}
+
 		ev := &streamv1.ServerEvent{
+			EventId:   uuid.New().String(),
 			CreatedAt: timestamppb.Now(),
 			Payload: &streamv1.ServerEvent_FriendRequestUpdated{
 				FriendRequestUpdated: &streamv1.FriendRequestUpdated{
-					Request: toProtoFriendRequest(req),
+					Request: protoRequest,
 				},
 			},
 		}
@@ -256,17 +345,6 @@ func (s *Service) CancelFriendRequest(ctx context.Context, requestID string) err
 		s.hub.BroadcastToUser(req.ToUserID.String(), ev)
 	}
 	return nil
-}
-
-func toProtoFriendRequest(req *FriendRequest) *friendsv1.FriendRequest {
-	return &friendsv1.FriendRequest{
-		Id:         req.ID.String(),
-		FromUserId: req.FromUserID.String(),
-		ToUserId:   req.ToUserID.String(),
-		Status:     friendsv1.FriendRequestStatus_FRIEND_REQUEST_STATUS_PENDING,
-		CreatedAt:  timestamppb.New(req.CreatedAt),
-		UpdatedAt:  timestamppb.New(req.UpdatedAt),
-	}
 }
 
 func (s *Service) RemoveFriend(ctx context.Context, friendUserID string) error {
@@ -285,7 +363,35 @@ func (s *Service) RemoveFriend(ctx context.Context, friendUserID string) error {
 		return errors.BadRequest("invalid friend user id")
 	}
 
-	return s.repo.DeleteFriendship(ctx, userUUID, friendUUID)
+	if err := s.repo.DeleteFriendship(ctx, userUUID, friendUUID); err != nil {
+		return err
+	}
+
+	if s.hub != nil {
+		s.hub.BroadcastToUser(friendUserID, &streamv1.ServerEvent{
+			EventId:   uuid.New().String(),
+			CreatedAt: timestamppb.Now(),
+			Payload: &streamv1.ServerEvent_FriendRemoved{
+				FriendRemoved: &streamv1.FriendRemoved{
+					UserId:    friendUserID,
+					RemovedBy: userID,
+				},
+			},
+		})
+
+		s.hub.BroadcastToUser(userID, &streamv1.ServerEvent{
+			EventId:   uuid.New().String(),
+			CreatedAt: timestamppb.Now(),
+			Payload: &streamv1.ServerEvent_FriendRemoved{
+				FriendRemoved: &streamv1.FriendRemoved{
+					UserId:    userID,
+					RemovedBy: userID,
+				},
+			},
+		})
+	}
+
+	return nil
 }
 
 func (s *Service) ListFriends(ctx context.Context) ([]*Friend, error) {
@@ -348,7 +454,23 @@ func (s *Service) BlockUser(ctx context.Context, blockedUserID string) error {
 
 	_ = s.repo.DeleteFriendship(ctx, userUUID, blockedUUID)
 
-	return s.repo.BlockUser(ctx, userUUID, blockedUUID)
+	if err := s.repo.BlockUser(ctx, userUUID, blockedUUID); err != nil {
+		return err
+	}
+
+	if s.hub != nil {
+		s.hub.BroadcastToUser(blockedUserID, &streamv1.ServerEvent{
+			EventId:   uuid.New().String(),
+			CreatedAt: timestamppb.Now(),
+			Payload: &streamv1.ServerEvent_UserBlocked{
+				UserBlocked: &streamv1.UserBlocked{
+					BlockerId: userID,
+				},
+			},
+		})
+	}
+
+	return nil
 }
 
 func (s *Service) UnblockUser(ctx context.Context, blockedUserID string) error {
@@ -367,7 +489,23 @@ func (s *Service) UnblockUser(ctx context.Context, blockedUserID string) error {
 		return errors.BadRequest("invalid blocked user id")
 	}
 
-	return s.repo.UnblockUser(ctx, userUUID, blockedUUID)
+	if err := s.repo.UnblockUser(ctx, userUUID, blockedUUID); err != nil {
+		return err
+	}
+
+	if s.hub != nil {
+		s.hub.BroadcastToUser(blockedUserID, &streamv1.ServerEvent{
+			EventId:   uuid.New().String(),
+			CreatedAt: timestamppb.Now(),
+			Payload: &streamv1.ServerEvent_UserUnblocked{
+				UserUnblocked: &streamv1.UserUnblocked{
+					UnblockerId: userID,
+				},
+			},
+		})
+	}
+
+	return nil
 }
 
 func (s *Service) ListBlockedUsers(ctx context.Context) ([]string, error) {
