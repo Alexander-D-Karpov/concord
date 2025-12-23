@@ -4,6 +4,8 @@ package concord.auth.v1;
 
 option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/auth/v1;authv1";
 
+import "google/api/annotations.proto";
+
 message LoginPasswordRequest {
   string handle = 1;
   string password = 2;
@@ -49,10 +51,40 @@ message RegisterRequest {
 message EmptyResponse {}
 
 service AuthService {
-  rpc Register(RegisterRequest) returns (Token);
-  rpc LoginPassword(LoginPasswordRequest) returns (Token);
-  rpc LoginOAuth(LoginOAuthRequest) returns (Token);
-  rpc OAuthBegin(OAuthBeginRequest) returns (OAuthBeginResponse);
-  rpc Refresh(RefreshRequest) returns (Token);
-  rpc Logout(LogoutRequest) returns (EmptyResponse);
+  rpc Register(RegisterRequest) returns (Token) {
+    option (google.api.http) = {
+      post: "/v1/auth/register"
+      body: "*"
+    };
+  }
+  rpc LoginPassword(LoginPasswordRequest) returns (Token) {
+    option (google.api.http) = {
+      post: "/v1/auth/login"
+      body: "*"
+    };
+  }
+  rpc LoginOAuth(LoginOAuthRequest) returns (Token) {
+    option (google.api.http) = {
+      post: "/v1/auth/oauth"
+      body: "*"
+    };
+  }
+  rpc OAuthBegin(OAuthBeginRequest) returns (OAuthBeginResponse) {
+    option (google.api.http) = {
+      post: "/v1/auth/oauth/begin"
+      body: "*"
+    };
+  }
+  rpc Refresh(RefreshRequest) returns (Token) {
+    option (google.api.http) = {
+      post: "/v1/auth/refresh"
+      body: "*"
+    };
+  }
+  rpc Logout(LogoutRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/auth/logout"
+      body: "*"
+    };
+  }
 }

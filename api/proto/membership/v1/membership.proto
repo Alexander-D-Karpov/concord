@@ -4,8 +4,9 @@ package concord.membership.v1;
 
 option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/membership/v1;membershipv1";
 
-import "common/v1/types.proto";
+import "google/api/annotations.proto";
 import "google/protobuf/timestamp.proto";
+import "common/v1/types.proto";
 
 message InviteRequest {
   string room_id = 1;
@@ -54,7 +55,6 @@ message RoomInvite {
   RoomInviteStatus status = 6;
   google.protobuf.Timestamp created_at = 7;
   google.protobuf.Timestamp updated_at = 8;
-  // Populated user info
   string invited_user_handle = 9;
   string invited_user_display_name = 10;
   string invited_user_avatar_url = 11;
@@ -83,13 +83,52 @@ message ListRoomInvitesResponse {
 }
 
 service MembershipService {
-  rpc Invite(InviteRequest) returns (RoomInvite);
-  rpc AcceptRoomInvite(AcceptRoomInviteRequest) returns (concord.common.v1.Member);
-  rpc RejectRoomInvite(RejectRoomInviteRequest) returns (EmptyResponse);
-  rpc CancelRoomInvite(CancelRoomInviteRequest) returns (EmptyResponse);
-  rpc ListRoomInvites(ListRoomInvitesRequest) returns (ListRoomInvitesResponse);
-  rpc Remove(RemoveRequest) returns (EmptyResponse);
-  rpc SetRole(SetRoleRequest) returns (concord.common.v1.Member);
-  rpc SetNickname(SetNicknameRequest) returns (concord.common.v1.Member);
-  rpc ListMembers(ListMembersRequest) returns (ListMembersResponse);
+  rpc Invite(InviteRequest) returns (RoomInvite) {
+    option (google.api.http) = {
+      post: "/v1/rooms/{room_id}/invites"
+      body: "*"
+    };
+  }
+  rpc AcceptRoomInvite(AcceptRoomInviteRequest) returns (concord.common.v1.Member) {
+    option (google.api.http) = {
+      post: "/v1/invites/{invite_id}/accept"
+    };
+  }
+  rpc RejectRoomInvite(RejectRoomInviteRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/invites/{invite_id}/reject"
+    };
+  }
+  rpc CancelRoomInvite(CancelRoomInviteRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      delete: "/v1/invites/{invite_id}"
+    };
+  }
+  rpc ListRoomInvites(ListRoomInvitesRequest) returns (ListRoomInvitesResponse) {
+    option (google.api.http) = {
+      get: "/v1/invites"
+    };
+  }
+  rpc Remove(RemoveRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      delete: "/v1/rooms/{room_id}/members/{user_id}"
+    };
+  }
+  rpc SetRole(SetRoleRequest) returns (concord.common.v1.Member) {
+    option (google.api.http) = {
+      put: "/v1/rooms/{room_id}/members/{user_id}/role"
+      body: "*"
+    };
+  }
+  rpc SetNickname(SetNicknameRequest) returns (concord.common.v1.Member) {
+    option (google.api.http) = {
+      put: "/v1/rooms/{room_id}/nickname"
+      body: "*"
+    };
+  }
+  rpc ListMembers(ListMembersRequest) returns (ListMembersResponse) {
+    option (google.api.http) = {
+      get: "/v1/rooms/{room_id}/members"
+    };
+  }
 }

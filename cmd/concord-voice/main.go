@@ -113,6 +113,7 @@ func run() error {
 		voiceRouter,
 		jwtManager,
 		logger,
+		metrics,
 	)
 	if err != nil {
 		return fmt.Errorf("create UDP server: %w", err)
@@ -138,7 +139,6 @@ func run() error {
 	)
 	netinfo.PrintAccessBanner(advertised, "Concord Voice Server")
 
-	// Register with main API if configured
 	var registrar *discovery.Registrar
 	if cfg.Voice.RegistryURL != "" {
 		publicAddr := advertised.PublicHost
@@ -146,13 +146,17 @@ func run() error {
 			publicAddr = advertised.LANHost
 		}
 
+		// Use the port from advertised, don't append again
+		udpAddress := fmt.Sprintf("%s:%d", publicAddr, advertised.Port)
+		ctrlAddress := fmt.Sprintf("%s:%d", publicAddr, cfg.Voice.ControlPort)
+
 		registrar, err = discovery.NewRegistrar(
 			cfg.Voice.RegistryURL,
 			serverID,
 			"concord-voice",
 			cfg.Voice.Region,
-			fmt.Sprintf("%s:%d", publicAddr, udpPort),
-			fmt.Sprintf("%s:%d", publicAddr, cfg.Voice.ControlPort),
+			udpAddress,
+			ctrlAddress,
 			1000,
 			logger,
 		)
@@ -169,15 +173,13 @@ func run() error {
 
 			// Stats function for heartbeat
 			statsFunc := func() (int32, int32, float64, float64) {
-				rooms := roomManager.GetAllRooms()
+				rooms := sessionManager.GetAllRooms()
 				sessions := sessionManager.GetAllSessions()
 
-				// CPU estimation
 				var m runtime.MemStats
 				runtime.ReadMemStats(&m)
 				cpu := float64(runtime.NumGoroutine()) / 100.0
 
-				// Outbound bandwidth
 				stats := metrics.GetStats()
 				outboundMbps := float64(stats.BytesSent) / (1024 * 1024)
 
@@ -226,7 +228,6 @@ func run() error {
 		}
 	}()
 
-	// Background cleanup and stats goroutine
 	go func() {
 		cleanupTicker := time.NewTicker(30 * time.Second)
 		statsTicker := time.NewTicker(10 * time.Second)
@@ -236,39 +237,36 @@ func run() error {
 		for {
 			select {
 			case <-cleanupTicker.C:
-				// Clean up inactive sessions (2 minute timeout)
 				removed := sessionManager.CleanupInactive(2 * time.Minute)
 				if len(removed) > 0 {
 					logger.Info("cleaned up inactive sessions",
 						zap.Int("count", len(removed)),
 					)
 
-					// Update room states
 					for _, sessionID := range removed {
-						// Room cleanup would happen here if needed
 						telemetryLogger.LogSessionEnded(sessionID, "", "")
 					}
 				}
 
 			case <-statsTicker.C:
-				// Update metrics
 				sessions := sessionManager.GetAllSessions()
-				rooms := roomManager.GetAllRooms()
+				rooms := sessionManager.GetAllRooms() // Use session manager's room tracking
 
 				metrics.SetActiveSessions(int32(len(sessions)))
 				metrics.SetActiveRooms(int32(len(rooms)))
 
-				// Log stats periodically
 				stats := metrics.GetStats()
-				logger.Debug("server stats",
-					zap.Int("active_sessions", len(sessions)),
-					zap.Int("active_rooms", len(rooms)),
-					zap.Uint64("packets_received", stats.PacketsReceived),
-					zap.Uint64("packets_sent", stats.PacketsSent),
-					zap.Uint64("bytes_received", stats.BytesReceived),
-					zap.Uint64("bytes_sent", stats.BytesSent),
-					zap.Uint64("packets_dropped", stats.PacketsDropped),
-				)
+				if len(sessions) > 0 {
+					logger.Debug("server stats",
+						zap.Int("active_sessions", len(sessions)),
+						zap.Int("active_rooms", len(rooms)),
+						zap.Uint64("packets_received", stats.PacketsReceived),
+						zap.Uint64("packets_sent", stats.PacketsSent),
+						zap.Uint64("bytes_received", stats.BytesReceived),
+						zap.Uint64("bytes_sent", stats.BytesSent),
+						zap.Uint64("packets_dropped", stats.PacketsDropped),
+					)
+				}
 
 			case <-ctx.Done():
 				return

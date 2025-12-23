@@ -4,6 +4,7 @@ package concord.friends.v1;
 
 option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/friends/v1;friendsv1";
 
+import "google/api/annotations.proto";
 import "google/protobuf/timestamp.proto";
 
 enum FriendRequestStatus {
@@ -20,7 +21,6 @@ message FriendRequest {
   FriendRequestStatus status = 4;
   google.protobuf.Timestamp created_at = 5;
   google.protobuf.Timestamp updated_at = 6;
-
   string from_handle = 7;
   string from_display_name = 8;
   string from_avatar_url = 9;
@@ -92,16 +92,55 @@ message ListBlockedUsersResponse {
 message EmptyResponse {}
 
 service FriendsService {
-  rpc SendFriendRequest(SendFriendRequestRequest) returns (SendFriendRequestResponse);
-  rpc AcceptFriendRequest(AcceptFriendRequestRequest) returns (EmptyResponse);
-  rpc RejectFriendRequest(RejectFriendRequestRequest) returns (EmptyResponse);
-  rpc CancelFriendRequest(CancelFriendRequestRequest) returns (EmptyResponse);
-  rpc RemoveFriend(RemoveFriendRequest) returns (EmptyResponse);
-
-  rpc ListFriends(ListFriendsRequest) returns (ListFriendsResponse);
-  rpc ListPendingRequests(ListPendingRequestsRequest) returns (ListPendingRequestsResponse);
-
-  rpc BlockUser(BlockUserRequest) returns (EmptyResponse);
-  rpc UnblockUser(UnblockUserRequest) returns (EmptyResponse);
-  rpc ListBlockedUsers(ListBlockedUsersRequest) returns (ListBlockedUsersResponse);
+  rpc SendFriendRequest(SendFriendRequestRequest) returns (SendFriendRequestResponse) {
+    option (google.api.http) = {
+      post: "/v1/friends/requests"
+      body: "*"
+    };
+  }
+  rpc AcceptFriendRequest(AcceptFriendRequestRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/friends/requests/{request_id}/accept"
+    };
+  }
+  rpc RejectFriendRequest(RejectFriendRequestRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/friends/requests/{request_id}/reject"
+    };
+  }
+  rpc CancelFriendRequest(CancelFriendRequestRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      delete: "/v1/friends/requests/{request_id}"
+    };
+  }
+  rpc RemoveFriend(RemoveFriendRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      delete: "/v1/friends/{user_id}"
+    };
+  }
+  rpc ListFriends(ListFriendsRequest) returns (ListFriendsResponse) {
+    option (google.api.http) = {
+      get: "/v1/friends"
+    };
+  }
+  rpc ListPendingRequests(ListPendingRequestsRequest) returns (ListPendingRequestsResponse) {
+    option (google.api.http) = {
+      get: "/v1/friends/requests"
+    };
+  }
+  rpc BlockUser(BlockUserRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/users/{user_id}/block"
+    };
+  }
+  rpc UnblockUser(UnblockUserRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      delete: "/v1/users/{user_id}/block"
+    };
+  }
+  rpc ListBlockedUsers(ListBlockedUsersRequest) returns (ListBlockedUsersResponse) {
+    option (google.api.http) = {
+      get: "/v1/users/blocked"
+    };
+  }
 }

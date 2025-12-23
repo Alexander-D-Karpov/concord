@@ -118,3 +118,17 @@ func (c *Cache) DeletePattern(ctx context.Context, pattern string) error {
 	_, err := pipe.Exec(ctx)
 	return err
 }
+
+func (c *Cache) HSet(ctx context.Context, key string, values map[string]string, ttl time.Duration) error {
+	pipe := c.client.Pipeline()
+	for k, v := range values {
+		pipe.HSet(ctx, key, k, v)
+	}
+	pipe.Expire(ctx, key, ttl)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+func (c *Cache) HGetAll(ctx context.Context, key string) (map[string]string, error) {
+	return c.client.HGetAll(ctx, key).Result()
+}

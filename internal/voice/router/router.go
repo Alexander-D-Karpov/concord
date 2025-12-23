@@ -1,7 +1,6 @@
 package router
 
 import (
-	"fmt"
 	"net"
 	"sync"
 
@@ -19,8 +18,9 @@ type Router struct {
 }
 
 type sendTask struct {
-	packet *protocol.Packet
-	addr   *net.UDPAddr
+	data []byte
+	addr *net.UDPAddr
+	conn *net.UDPConn
 }
 
 func NewRouter(sessionManager *session.Manager, logger *zap.Logger) *Router {
@@ -45,40 +45,87 @@ func (r *Router) Stop() {
 	r.wg.Wait()
 }
 
-func (r *Router) RoutePacket(packet *protocol.Packet, fromAddr *net.UDPAddr) {
-	roomID := extractRoomID(packet.RoomID)
-	if roomID == "" {
-		r.logger.Debug("packet missing room ID")
-		return
-	}
+func (r *Router) RoutePacket(packet *protocol.Packet, fromAddr *net.UDPAddr, conn *net.UDPConn) {
+	pktType := packet.Header.Type
 
-	sessions := r.sessionManager.GetRoomSessions(roomID)
-	if len(sessions) == 0 {
-		return
-	}
-
-	switch packet.Type {
+	switch pktType {
 	case protocol.PacketTypeAudio, protocol.PacketTypeVideo:
-		r.routeMediaPacket(packet, fromAddr, sessions)
+		sess := r.sessionManager.GetByAddr(fromAddr)
+		if sess == nil {
+			r.logger.Debug("unknown sender session", zap.String("from", fromAddr.String()))
+			return
+		}
+
+		roomID := sess.RoomID
+		if roomID == "" {
+			r.logger.Debug("sender session missing room id", zap.Uint32("ssrc", sess.SSRC))
+			return
+		}
+
+		sessions := r.sessionManager.GetRoomSessions(roomID)
+		if len(sessions) == 0 {
+			r.logger.Debug("no sessions in room", zap.String("room_id", roomID))
+			return
+		}
+
+		data := packet.Marshal()
+		r.routeMediaPacket(data, packet, fromAddr, conn, sessions)
+		return
+
 	case protocol.PacketTypeSpeaking:
-		r.routeSpeakingPacket(packet, fromAddr, sessions)
+		roomID := packet.GetRoomIDString()
+		if roomID == "" {
+			r.logger.Debug("speaking packet missing room id")
+			return
+		}
+
+		sessions := r.sessionManager.GetRoomSessions(roomID)
+		if len(sessions) == 0 {
+			r.logger.Debug("no sessions in room", zap.String("room_id", roomID))
+			return
+		}
+
+		data := packet.Marshal()
+		r.routeSpeakingPacket(data, fromAddr, conn, sessions)
+		return
 	}
 }
 
-func (r *Router) routeMediaPacket(packet *protocol.Packet, fromAddr *net.UDPAddr, sessions []*session.Session) {
+func sameUDPAddr(a, b *net.UDPAddr) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	if a.Port != b.Port {
+		return false
+	}
+	if a.IP == nil || b.IP == nil {
+		return a.String() == b.String()
+	}
+	return a.IP.Equal(b.IP)
+}
+
+func (r *Router) routeMediaPacket(
+	data []byte,
+	packet *protocol.Packet,
+	fromAddr *net.UDPAddr,
+	conn *net.UDPConn,
+	sessions []*session.Session,
+) {
 	for _, sess := range sessions {
-		if sess.Addr.String() == fromAddr.String() {
+		to := sess.GetAddr()
+		if to == nil {
 			continue
 		}
 
-		if sess.Muted && packet.Type == protocol.PacketTypeAudio {
+		if sameUDPAddr(to, fromAddr) {
 			continue
 		}
 
 		select {
 		case r.sendQueue <- &sendTask{
-			packet: packet,
-			addr:   sess.GetAddr(),
+			data: data,
+			addr: to,
+			conn: conn,
 		}:
 		default:
 			r.logger.Warn("send queue full, dropping packet",
@@ -88,19 +135,32 @@ func (r *Router) routeMediaPacket(packet *protocol.Packet, fromAddr *net.UDPAddr
 	}
 }
 
-func (r *Router) routeSpeakingPacket(packet *protocol.Packet, fromAddr *net.UDPAddr, sessions []*session.Session) {
+func (r *Router) routeSpeakingPacket(
+	data []byte,
+	fromAddr *net.UDPAddr,
+	conn *net.UDPConn,
+	sessions []*session.Session,
+) {
 	for _, sess := range sessions {
-		if sess.Addr.String() == fromAddr.String() {
+		to := sess.GetAddr()
+		if to == nil {
+			continue
+		}
+
+		if sameUDPAddr(to, fromAddr) {
 			continue
 		}
 
 		select {
 		case r.sendQueue <- &sendTask{
-			packet: packet,
-			addr:   sess.GetAddr(),
+			data: data,
+			addr: to,
+			conn: conn,
 		}:
 		default:
-			r.logger.Warn("send queue full, dropping speaking packet")
+			r.logger.Warn("send queue full, dropping speaking packet",
+				zap.Uint32("ssrc", sess.SSRC),
+			)
 		}
 	}
 }
@@ -110,12 +170,20 @@ func (r *Router) sendWorker() {
 
 	for {
 		select {
-		case task := <-r.sendQueue:
-			r.logger.Debug("routing packet",
-				zap.Uint8("type", task.packet.Type),
-				zap.Uint32("ssrc", task.packet.SSRC),
-				zap.String("to", task.addr.String()),
-			)
+		case task, ok := <-r.sendQueue:
+			if !ok {
+				return
+			}
+			if task == nil || task.conn == nil || task.addr == nil {
+				continue
+			}
+
+			if _, err := task.conn.WriteToUDP(task.data, task.addr); err != nil {
+				r.logger.Debug("failed to send packet",
+					zap.String("to", task.addr.String()),
+					zap.Error(err),
+				)
+			}
 
 		case <-r.stopChan:
 			return
@@ -123,28 +191,41 @@ func (r *Router) sendWorker() {
 	}
 }
 
-func extractRoomID(roomIDBytes []byte) string {
-	if len(roomIDBytes) == 0 {
-		return ""
+func (r *Router) RouteMediaRaw(h protocol.MediaHeader, raw []byte, fromAddr *net.UDPAddr, conn *net.UDPConn) {
+	sender := r.sessionManager.GetBySSRC(h.SSRC)
+	if sender == nil {
+		r.logger.Debug("unknown sender SSRC", zap.Uint32("ssrc", h.SSRC))
+		return
 	}
 
-	if len(roomIDBytes) == 16 {
-		return uuidBytesToString(roomIDBytes)
+	roomID := sender.RoomID
+	if roomID == "" {
+		r.logger.Debug("sender missing room id", zap.Uint32("ssrc", sender.SSRC))
+		return
 	}
 
-	return string(roomIDBytes)
-}
-
-func uuidBytesToString(b []byte) string {
-	if len(b) != 16 {
-		return ""
+	sessions := r.sessionManager.GetRoomSessions(roomID)
+	if len(sessions) == 0 {
+		r.logger.Debug("no sessions in room", zap.String("room_id", roomID))
+		return
 	}
 
-	return fmt.Sprintf("%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-		b[0], b[1], b[2], b[3],
-		b[4], b[5],
-		b[6], b[7],
-		b[8], b[9],
-		b[10], b[11], b[12], b[13], b[14], b[15],
-	)
+	pktType := h.Type
+
+	for _, dst := range sessions {
+		to := dst.GetAddr()
+		if to == nil || sameUDPAddr(to, fromAddr) {
+			continue
+		}
+
+		if pktType == protocol.PacketTypeVideo && !dst.VideoEnabled {
+			continue
+		}
+
+		select {
+		case r.sendQueue <- &sendTask{data: raw, addr: to, conn: conn}:
+		default:
+			r.logger.Warn("send queue full, dropping packet", zap.Uint32("ssrc", dst.SSRC))
+		}
+	}
 }

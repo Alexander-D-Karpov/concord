@@ -7,7 +7,11 @@ import (
 	"time"
 
 	authv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/auth/v1"
+	callv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/call/v1"
 	chatv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/chat/v1"
+	dmv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/dm/v1"
+	friendsv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/friends/v1"
+	membershipv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/membership/v1"
 	roomsv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/rooms/v1"
 	usersv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/users/v1"
 	"github.com/Alexander-D-Karpov/concord/internal/middleware"
@@ -15,6 +19,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 type Gateway struct {
@@ -34,24 +39,34 @@ func (g *Gateway) Init(ctx context.Context) error {
 	mux := runtime.NewServeMux(
 		runtime.WithIncomingHeaderMatcher(customMatcher),
 		runtime.WithErrorHandler(customErrorHandler),
+		runtime.WithMarshalerOption(runtime.MIMEWildcard, &runtime.JSONPb{
+			MarshalOptions: protojson.MarshalOptions{
+				UseProtoNames:   true,
+				EmitUnpopulated: true,
+			},
+			UnmarshalOptions: protojson.UnmarshalOptions{
+				DiscardUnknown: true,
+			},
+		}),
 	)
 
 	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 
-	if err := authv1.RegisterAuthServiceHandlerFromEndpoint(ctx, mux, g.grpcAddr, opts); err != nil {
-		return fmt.Errorf("register auth handler: %w", err)
+	handlers := []func(context.Context, *runtime.ServeMux, string, []grpc.DialOption) error{
+		authv1.RegisterAuthServiceHandlerFromEndpoint,
+		usersv1.RegisterUsersServiceHandlerFromEndpoint,
+		roomsv1.RegisterRoomsServiceHandlerFromEndpoint,
+		chatv1.RegisterChatServiceHandlerFromEndpoint,
+		membershipv1.RegisterMembershipServiceHandlerFromEndpoint,
+		callv1.RegisterCallServiceHandlerFromEndpoint,
+		friendsv1.RegisterFriendsServiceHandlerFromEndpoint,
+		dmv1.RegisterDMServiceHandlerFromEndpoint,
 	}
 
-	if err := usersv1.RegisterUsersServiceHandlerFromEndpoint(ctx, mux, g.grpcAddr, opts); err != nil {
-		return fmt.Errorf("register users handler: %w", err)
-	}
-
-	if err := roomsv1.RegisterRoomsServiceHandlerFromEndpoint(ctx, mux, g.grpcAddr, opts); err != nil {
-		return fmt.Errorf("register rooms handler: %w", err)
-	}
-
-	if err := chatv1.RegisterChatServiceHandlerFromEndpoint(ctx, mux, g.grpcAddr, opts); err != nil {
-		return fmt.Errorf("register chat handler: %w", err)
+	for _, register := range handlers {
+		if err := register(ctx, mux, g.grpcAddr, opts); err != nil {
+			return fmt.Errorf("register handler: %w", err)
+		}
 	}
 
 	g.handler = middleware.CompressionMiddleware(
@@ -97,7 +112,7 @@ func (g *Gateway) Start(ctx context.Context, port int) error {
 
 func customMatcher(key string) (string, bool) {
 	switch key {
-	case "authorization", "x-request-id", "x-correlation-id":
+	case "authorization", "x-request-id", "x-correlation-id", "grpc-timeout":
 		return key, true
 	default:
 		return runtime.DefaultHeaderMatcher(key)
@@ -111,8 +126,9 @@ func customErrorHandler(ctx context.Context, mux *runtime.ServeMux, marshaler ru
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, Grpc-Timeout")
+		w.Header().Set("Access-Control-Expose-Headers", "Grpc-Metadata-*")
 		w.Header().Set("Access-Control-Max-Age", "86400")
 
 		if r.Method == "OPTIONS" {
@@ -127,10 +143,8 @@ func corsMiddleware(next http.Handler) http.Handler {
 func loggingMiddleware(next http.Handler, logger *zap.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-
 		wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(wrapped, r)
-
 		logger.Info("http request",
 			zap.String("method", r.Method),
 			zap.String("path", r.URL.Path),

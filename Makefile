@@ -12,6 +12,9 @@ build:
 clean:
 	@rm -rf bin/ api/gen/
 
+clean-proto-deps:
+	@rm -rf api/proto-deps/
+
 test-cleanup:
 	@echo "Resetting test database..."
 	@PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS concord_test;" 2>/dev/null || true

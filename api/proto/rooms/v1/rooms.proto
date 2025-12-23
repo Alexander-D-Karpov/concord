@@ -4,8 +4,9 @@ package concord.rooms.v1;
 
 option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/rooms/v1;roomsv1";
 
-import "common/v1/types.proto";
+import "google/api/annotations.proto";
 import "google/protobuf/wrappers.proto";
+import "common/v1/types.proto";
 
 message CreateRoomRequest {
   string name = 1;
@@ -21,10 +22,9 @@ message GetRoomRequest {
 
 message UpdateRoomRequest {
   string room_id = 1;
-
-  google.protobuf.StringValue name        = 2; // optional
-  google.protobuf.StringValue description = 3; // optional
-  google.protobuf.BoolValue   is_private  = 4; // optional
+  google.protobuf.StringValue name = 2;
+  google.protobuf.StringValue description = 3;
+  google.protobuf.BoolValue is_private = 4;
 }
 
 message ListRoomsForUserRequest {}
@@ -45,10 +45,37 @@ message DeleteRoomRequest {
 message EmptyResponse {}
 
 service RoomsService {
-  rpc CreateRoom(CreateRoomRequest) returns (concord.common.v1.Room);
-  rpc GetRoom(GetRoomRequest) returns (concord.common.v1.Room);
-  rpc UpdateRoom(UpdateRoomRequest) returns (concord.common.v1.Room);
-  rpc ListRoomsForUser(ListRoomsForUserRequest) returns (ListRoomsForUserResponse);
-  rpc AttachVoiceServer(AttachVoiceServerRequest) returns (concord.common.v1.Room);
-  rpc DeleteRoom(DeleteRoomRequest) returns (EmptyResponse);
+  rpc CreateRoom(CreateRoomRequest) returns (concord.common.v1.Room) {
+    option (google.api.http) = {
+      post: "/v1/rooms"
+      body: "*"
+    };
+  }
+  rpc GetRoom(GetRoomRequest) returns (concord.common.v1.Room) {
+    option (google.api.http) = {
+      get: "/v1/rooms/{room_id}"
+    };
+  }
+  rpc UpdateRoom(UpdateRoomRequest) returns (concord.common.v1.Room) {
+    option (google.api.http) = {
+      patch: "/v1/rooms/{room_id}"
+      body: "*"
+    };
+  }
+  rpc ListRoomsForUser(ListRoomsForUserRequest) returns (ListRoomsForUserResponse) {
+    option (google.api.http) = {
+      get: "/v1/rooms"
+    };
+  }
+  rpc AttachVoiceServer(AttachVoiceServerRequest) returns (concord.common.v1.Room) {
+    option (google.api.http) = {
+      post: "/v1/rooms/{room_id}/voice-server"
+      body: "*"
+    };
+  }
+  rpc DeleteRoom(DeleteRoomRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      delete: "/v1/rooms/{room_id}"
+    };
+  }
 }

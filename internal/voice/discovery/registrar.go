@@ -100,10 +100,6 @@ func (r *Registrar) StartHeartbeat(ctx context.Context, interval time.Duration, 
 				_, err := r.client.Heartbeat(ctx, req)
 				if err != nil {
 					r.logger.Warn("heartbeat failed", zap.Error(err))
-				} else {
-					r.logger.Debug("heartbeat sent",
-						zap.Int32("active_sessions", activeSessions),
-					)
 				}
 
 			case <-r.stopChan:

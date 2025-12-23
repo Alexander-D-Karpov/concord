@@ -187,5 +187,14 @@ message ServerEvent {
 }
 
 service StreamService {
-  rpc EventStream(stream ClientEvent) returns (stream ServerEvent);
+  // EventStream provides real-time updates for messages, presence, and voice state.
+  // This is a bidirectional streaming RPC - use a gRPC client for proper streaming support.
+  // For HTTP clients, consider using Server-Sent Events endpoint at /v1/stream/events (if implemented).
+  rpc EventStream(stream ClientEvent) returns (stream ServerEvent) {
+    option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_operation) = {
+      summary: "Bidirectional Event Stream";
+      description: "Real-time bidirectional streaming for events. Requires gRPC client. HTTP/REST clients should use polling or SSE alternatives.";
+      tags: "Streaming";
+    };
+  }
 }

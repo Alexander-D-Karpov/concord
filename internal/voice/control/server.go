@@ -69,13 +69,6 @@ func (s *Server) Heartbeat(ctx context.Context, req *registryv1.HeartbeatRequest
 	return &registryv1.EmptyResponse{}, nil
 }
 
-func (s *Server) GetStats(ctx context.Context) *Stats {
-	return &Stats{
-		ActiveSessions: int32(len(s.sessionManager.GetAllSessions())),
-		Capacity:       s.capacity,
-	}
-}
-
 type Stats struct {
 	ActiveSessions int32
 	Capacity       int32

@@ -4,11 +4,13 @@ package concord.call.v1;
 
 option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/call/v1;callv1";
 
+import "google/api/annotations.proto";
 import "google/protobuf/timestamp.proto";
 
 message JoinVoiceRequest {
   string room_id = 1;
   bool audio_only = 2;
+  string preferred_region = 3;
 }
 
 message UdpEndpoint {
@@ -57,7 +59,6 @@ message SetMediaPrefsRequest {
 
 message EmptyResponse {}
 
-
 message GetVoiceStatusRequest {
   string room_id = 1;
 }
@@ -76,8 +77,26 @@ message GetVoiceStatusResponse {
 }
 
 service CallService {
-  rpc JoinVoice(JoinVoiceRequest) returns (JoinVoiceResponse);
-  rpc LeaveVoice(LeaveVoiceRequest) returns (EmptyResponse);
-  rpc SetMediaPrefs(SetMediaPrefsRequest) returns (EmptyResponse);
-  rpc GetVoiceStatus(GetVoiceStatusRequest) returns (GetVoiceStatusResponse);
+  rpc JoinVoice(JoinVoiceRequest) returns (JoinVoiceResponse) {
+    option (google.api.http) = {
+      post: "/v1/rooms/{room_id}/voice/join"
+      body: "*"
+    };
+  }
+  rpc LeaveVoice(LeaveVoiceRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/rooms/{room_id}/voice/leave"
+    };
+  }
+  rpc SetMediaPrefs(SetMediaPrefsRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      put: "/v1/rooms/{room_id}/voice/prefs"
+      body: "*"
+    };
+  }
+  rpc GetVoiceStatus(GetVoiceStatusRequest) returns (GetVoiceStatusResponse) {
+    option (google.api.http) = {
+      get: "/v1/rooms/{room_id}/voice"
+    };
+  }
 }

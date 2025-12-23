@@ -1,0 +1,196 @@
+syntax = "proto3";
+
+package concord.dm.v1;
+
+option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/dm/v1;dmv1";
+
+import "google/api/annotations.proto";
+import "google/protobuf/timestamp.proto";
+import "call/v1/call.proto";
+
+message DMChannel {
+  string id = 1;
+  string user1_id = 2;
+  string user2_id = 3;
+  google.protobuf.Timestamp created_at = 4;
+  google.protobuf.Timestamp updated_at = 5;
+  bool has_active_call = 6;
+}
+
+message DMChannelWithUser {
+  DMChannel channel = 1;
+  string other_user_id = 2;
+  string other_user_handle = 3;
+  string other_user_display = 4;
+  string other_user_avatar = 5;
+  string other_user_status = 6;
+}
+
+message GetOrCreateDMRequest {
+  string user_id = 1;
+}
+
+message GetOrCreateDMResponse {
+  DMChannel channel = 1;
+}
+
+message ListDMsRequest {}
+
+message ListDMsResponse {
+  repeated DMChannelWithUser channels = 1;
+}
+
+message CloseDMRequest {
+  string channel_id = 1;
+}
+
+message SendDMMessageRequest {
+  string channel_id = 1;
+  string content = 2;
+  repeated DMAttachmentUpload attachments = 3;
+}
+
+message DMAttachmentUpload {
+  string filename = 1;
+  string content_type = 2;
+  bytes data = 3;
+}
+
+message DMMessage {
+  string id = 1;
+  string channel_id = 2;
+  string author_id = 3;
+  string content = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp edited_at = 6;
+  bool deleted = 7;
+  repeated DMAttachment attachments = 8;
+}
+
+message DMAttachment {
+  string id = 1;
+  string url = 2;
+  string filename = 3;
+  string content_type = 4;
+  int64 size = 5;
+}
+
+message SendDMMessageResponse {
+  DMMessage message = 1;
+}
+
+message ListDMMessagesRequest {
+  string channel_id = 1;
+  int32 limit = 2;
+  string before_id = 3;
+}
+
+message ListDMMessagesResponse {
+  repeated DMMessage messages = 1;
+  bool has_more = 2;
+}
+
+message StartDMCallRequest {
+  string channel_id = 1;
+  bool audio_only = 2;
+}
+
+message StartDMCallResponse {
+  concord.call.v1.UdpEndpoint endpoint = 1;
+  string server_id = 2;
+  string voice_token = 3;
+  concord.call.v1.CodecHint codec = 4;
+  concord.call.v1.CryptoSuite crypto = 5;
+  string call_id = 6;
+}
+
+message JoinDMCallRequest {
+  string channel_id = 1;
+  bool audio_only = 2;
+}
+
+message JoinDMCallResponse {
+  concord.call.v1.UdpEndpoint endpoint = 1;
+  string server_id = 2;
+  string voice_token = 3;
+  concord.call.v1.CodecHint codec = 4;
+  concord.call.v1.CryptoSuite crypto = 5;
+  repeated concord.call.v1.Participant participants = 6;
+}
+
+message LeaveDMCallRequest {
+  string channel_id = 1;
+}
+
+message EndDMCallRequest {
+  string channel_id = 1;
+}
+
+message GetDMCallStatusRequest {
+  string channel_id = 1;
+}
+
+message GetDMCallStatusResponse {
+  bool active = 1;
+  repeated concord.call.v1.VoiceParticipant participants = 2;
+  google.protobuf.Timestamp started_at = 3;
+}
+
+message EmptyResponse {}
+
+service DMService {
+  rpc GetOrCreateDM(GetOrCreateDMRequest) returns (GetOrCreateDMResponse) {
+    option (google.api.http) = {
+      post: "/v1/dm"
+      body: "*"
+    };
+  }
+  rpc ListDMs(ListDMsRequest) returns (ListDMsResponse) {
+    option (google.api.http) = {
+      get: "/v1/dm"
+    };
+  }
+  rpc CloseDM(CloseDMRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      delete: "/v1/dm/{channel_id}"
+    };
+  }
+  rpc SendDMMessage(SendDMMessageRequest) returns (SendDMMessageResponse) {
+    option (google.api.http) = {
+      post: "/v1/dm/{channel_id}/messages"
+      body: "*"
+    };
+  }
+  rpc ListDMMessages(ListDMMessagesRequest) returns (ListDMMessagesResponse) {
+    option (google.api.http) = {
+      get: "/v1/dm/{channel_id}/messages"
+    };
+  }
+  rpc StartDMCall(StartDMCallRequest) returns (StartDMCallResponse) {
+    option (google.api.http) = {
+      post: "/v1/dm/{channel_id}/call/start"
+      body: "*"
+    };
+  }
+  rpc JoinDMCall(JoinDMCallRequest) returns (JoinDMCallResponse) {
+    option (google.api.http) = {
+      post: "/v1/dm/{channel_id}/call/join"
+      body: "*"
+    };
+  }
+  rpc LeaveDMCall(LeaveDMCallRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/dm/{channel_id}/call/leave"
+    };
+  }
+  rpc EndDMCall(EndDMCallRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/dm/{channel_id}/call/end"
+    };
+  }
+  rpc GetDMCallStatus(GetDMCallStatusRequest) returns (GetDMCallStatusResponse) {
+    option (google.api.http) = {
+      get: "/v1/dm/{channel_id}/call"
+    };
+  }
+}

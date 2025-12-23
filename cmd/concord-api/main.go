@@ -6,11 +6,14 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/Alexander-D-Karpov/concord/internal/security"
+	"github.com/Alexander-D-Karpov/concord/internal/swagger"
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -21,6 +24,7 @@ import (
 	authv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/auth/v1"
 	callv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/call/v1"
 	chatv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/chat/v1"
+	dmv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/dm/v1"
 	friendsv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/friends/v1"
 	membershipv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/membership/v1"
 	registryv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/registry/v1"
@@ -36,6 +40,7 @@ import (
 	"github.com/Alexander-D-Karpov/concord/internal/chat"
 	"github.com/Alexander-D-Karpov/concord/internal/common/config"
 	"github.com/Alexander-D-Karpov/concord/internal/common/logging"
+	"github.com/Alexander-D-Karpov/concord/internal/dm"
 	"github.com/Alexander-D-Karpov/concord/internal/events"
 	"github.com/Alexander-D-Karpov/concord/internal/friends"
 	"github.com/Alexander-D-Karpov/concord/internal/gateway"
@@ -90,6 +95,10 @@ func run() error {
 		zap.String("version", version),
 		zap.Int("grpc_port", cfg.Server.GRPCPort),
 	)
+
+	if err := generateOpenAPISpec(logger); err != nil {
+		logger.Warn("failed to generate OpenAPI spec", zap.Error(err))
+	}
 
 	database, err := db.New(cfg.Database)
 	if err != nil {
@@ -194,7 +203,7 @@ func run() error {
 
 	streamHandler := stream.NewHandler(eventsHub, usersRepo)
 
-	voiceAssignService := voiceassign.NewService(database.Pool, jwtManager)
+	voiceAssignService := voiceassign.NewService(database.Pool, jwtManager, cacheClient)
 	callHandler := call.NewHandler(voiceAssignService, roomsRepo, eventsHub, logger)
 
 	friendsRepo := friends.NewRepository(database.Pool)
@@ -203,6 +212,10 @@ func run() error {
 
 	adminService := admin.NewService(database.Pool, roomsRepo, eventsHub, logger)
 	adminHandler := admin.NewHandler(adminService)
+
+	dmRepo := dm.NewRepository(database.Pool)
+	dmService := dm.NewService(dmRepo, usersRepo, eventsHub, logger)
+	dmHandler := dm.NewHandler(dmService)
 
 	var oauthManager *oauth.Manager
 	if len(cfg.Auth.OAuth) > 0 {
@@ -269,8 +282,9 @@ func run() error {
 	callv1.RegisterCallServiceServer(grpcServer, callHandler)
 	registryv1.RegisterRegistryServiceServer(grpcServer, registryHandler)
 	friendsv1.RegisterFriendsServiceServer(grpcServer, friendsHandler)
-	reflection.Register(grpcServer)
 	adminv1.RegisterAdminServiceServer(grpcServer, adminHandler)
+	dmv1.RegisterDMServiceServer(grpcServer, dmHandler)
+	reflection.Register(grpcServer)
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Server.GRPCPort))
 	if err != nil {
@@ -282,7 +296,7 @@ func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	errChan := make(chan error, 4)
+	errChan := make(chan error, 5)
 
 	go func() {
 		if err := grpcServer.Serve(listener); err != nil {
@@ -307,15 +321,31 @@ func run() error {
 		return fmt.Errorf("init http gateway: %w", err)
 	}
 
-	go func() {
-		if err := httpGateway.Start(ctx, 8080); err != nil {
-			errChan <- fmt.Errorf("http gateway: %w", err)
-		}
-	}()
+	swaggerHandler, err := swagger.NewHandler("api/gen/openapiv2/concord.swagger.json", "/docs", logger)
+	if err != nil {
+		logger.Warn("swagger handler not available", zap.Error(err))
+	}
 
 	httpMux := http.NewServeMux()
 	httpMux.Handle("/files/", storageHandler)
+	if swaggerHandler != nil {
+		httpMux.Handle("/docs/", swaggerHandler)
+		httpMux.Handle("/docs", http.RedirectHandler("/docs/", http.StatusMovedPermanently))
+		logger.Info("swagger UI available at /docs")
+	}
 	httpMux.Handle("/", httpGateway)
+
+	httpServer := &http.Server{
+		Addr:    ":8080",
+		Handler: httpMux,
+	}
+
+	go func() {
+		logger.Info("HTTP server starting", zap.String("address", httpServer.Addr))
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errChan <- fmt.Errorf("http server: %w", err)
+		}
+	}()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -338,6 +368,11 @@ func run() error {
 		_ = eventsHub.Shutdown(hubCtx)
 		hubCancel()
 
+		logger.Info("stopping HTTP server")
+		httpCtx, httpCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = httpServer.Shutdown(httpCtx)
+		httpCancel()
+
 		logger.Info("stopping gRPC server")
 		grpcStopped := make(chan struct{})
 		go func() {
@@ -352,11 +387,6 @@ func run() error {
 			grpcServer.Stop()
 		}
 
-		logger.Info("stopping gateway")
-		gatewayCtx, gatewayCancel := context.WithTimeout(context.Background(), 1*time.Second)
-		_ = httpGateway.Shutdown(gatewayCtx)
-		gatewayCancel()
-
 		close(done)
 	}()
 
@@ -368,5 +398,30 @@ func run() error {
 		grpcServer.Stop()
 	}
 
+	return nil
+}
+
+func generateOpenAPISpec(logger *zap.Logger) error {
+	specPath := "api/gen/openapiv2/concord.swagger.json"
+	if _, err := os.Stat(specPath); err == nil {
+		logger.Info("OpenAPI spec exists", zap.String("path", specPath))
+		return nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(specPath), 0755); err != nil {
+		return err
+	}
+
+	logger.Info("generating OpenAPI spec...")
+	cmd := exec.Command("buf", "generate", "--path", "api")
+	cmd.Dir = "."
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("buf generate failed: %w", err)
+	}
+
+	logger.Info("OpenAPI spec generated", zap.String("path", specPath))
 	return nil
 }

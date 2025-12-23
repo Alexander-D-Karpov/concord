@@ -4,6 +4,7 @@ package concord.chat.v1;
 
 option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/chat/v1;chatv1";
 
+import "google/api/annotations.proto";
 import "common/v1/types.proto";
 
 message SendMessageRequest {
@@ -18,8 +19,8 @@ message MessageAttachmentUpload {
   string filename = 1;
   string content_type = 2;
   bytes data = 3;
-  int32 width = 4;   // optional, for images
-  int32 height = 5;  // optional, for images
+  int32 width = 4;
+  int32 height = 5;
 }
 
 message SendMessageResponse {
@@ -86,7 +87,7 @@ message ListPinnedMessagesResponse {
 }
 
 message GetThreadRequest {
-  string message_id = 1;  // parent message ID
+  string message_id = 1;
   int32 limit = 2;
   string cursor = 3;
 }
@@ -100,18 +101,62 @@ message GetThreadResponse {
 message EmptyResponse {}
 
 service ChatService {
-  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
-  rpc EditMessage(EditMessageRequest) returns (concord.common.v1.Message);
-  rpc DeleteMessage(DeleteMessageRequest) returns (EmptyResponse);
-  rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
-  rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse);
-
-  rpc AddReaction(AddReactionRequest) returns (EmptyResponse);
-  rpc RemoveReaction(RemoveReactionRequest) returns (EmptyResponse);
-
-  rpc PinMessage(PinMessageRequest) returns (EmptyResponse);
-  rpc UnpinMessage(UnpinMessageRequest) returns (EmptyResponse);
-  rpc ListPinnedMessages(ListPinnedMessagesRequest) returns (ListPinnedMessagesResponse);
-
-  rpc GetThread(GetThreadRequest) returns (GetThreadResponse);
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse) {
+    option (google.api.http) = {
+      post: "/v1/rooms/{room_id}/messages"
+      body: "*"
+    };
+  }
+  rpc EditMessage(EditMessageRequest) returns (concord.common.v1.Message) {
+    option (google.api.http) = {
+      patch: "/v1/messages/{message_id}"
+      body: "*"
+    };
+  }
+  rpc DeleteMessage(DeleteMessageRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      delete: "/v1/messages/{message_id}"
+    };
+  }
+  rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse) {
+    option (google.api.http) = {
+      get: "/v1/rooms/{room_id}/messages"
+    };
+  }
+  rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse) {
+    option (google.api.http) = {
+      get: "/v1/rooms/{room_id}/messages/search"
+    };
+  }
+  rpc AddReaction(AddReactionRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/messages/{message_id}/reactions"
+      body: "*"
+    };
+  }
+  rpc RemoveReaction(RemoveReactionRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      delete: "/v1/messages/{message_id}/reactions/{emoji}"
+    };
+  }
+  rpc PinMessage(PinMessageRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/rooms/{room_id}/messages/{message_id}/pin"
+    };
+  }
+  rpc UnpinMessage(UnpinMessageRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      delete: "/v1/rooms/{room_id}/messages/{message_id}/pin"
+    };
+  }
+  rpc ListPinnedMessages(ListPinnedMessagesRequest) returns (ListPinnedMessagesResponse) {
+    option (google.api.http) = {
+      get: "/v1/rooms/{room_id}/pins"
+    };
+  }
+  rpc GetThread(GetThreadRequest) returns (GetThreadResponse) {
+    option (google.api.http) = {
+      get: "/v1/messages/{message_id}/thread"
+    };
+  }
 }

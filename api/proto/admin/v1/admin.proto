@@ -4,6 +4,8 @@ package concord.admin.v1;
 
 option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/admin/v1;adminv1";
 
+import "google/api/annotations.proto";
+
 message KickRequest {
   string room_id = 1;
   string user_id = 2;
@@ -24,7 +26,22 @@ message MuteRequest {
 message EmptyResponse {}
 
 service AdminService {
-  rpc Kick(KickRequest) returns (EmptyResponse);
-  rpc Ban(BanRequest) returns (EmptyResponse);
-  rpc Mute(MuteRequest) returns (EmptyResponse);
+  rpc Kick(KickRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/rooms/{room_id}/kick"
+      body: "*"
+    };
+  }
+  rpc Ban(BanRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/rooms/{room_id}/ban"
+      body: "*"
+    };
+  }
+  rpc Mute(MuteRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/rooms/{room_id}/mute"
+      body: "*"
+    };
+  }
 }

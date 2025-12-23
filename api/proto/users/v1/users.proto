@@ -4,6 +4,7 @@ package concord.users.v1;
 
 option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/users/v1;usersv1";
 
+import "google/api/annotations.proto";
 import "common/v1/types.proto";
 
 message GetSelfRequest {}
@@ -19,7 +20,7 @@ message GetUserByHandleRequest {
 message UpdateProfileRequest {
   string display_name = 1;
   string avatar_url = 2;
-  string bio = 3; 
+  string bio = 3;
 }
 
 message UpdateStatusRequest {
@@ -47,11 +48,42 @@ message ListUsersByIDsResponse {
 }
 
 service UsersService {
-  rpc GetSelf(GetSelfRequest) returns (concord.common.v1.User);
-  rpc GetUser(GetUserRequest) returns (concord.common.v1.User);
-  rpc GetUserByHandle(GetUserByHandleRequest) returns (concord.common.v1.User);
-  rpc UpdateProfile(UpdateProfileRequest) returns (concord.common.v1.User);
-  rpc UpdateStatus(UpdateStatusRequest) returns (concord.common.v1.User);
-  rpc SearchUsers(SearchUsersRequest) returns (SearchUsersResponse);
-  rpc ListUsersByIDs(ListUsersByIDsRequest) returns (ListUsersByIDsResponse);
+  rpc GetSelf(GetSelfRequest) returns (concord.common.v1.User) {
+    option (google.api.http) = {
+      get: "/v1/users/me"
+    };
+  }
+  rpc GetUser(GetUserRequest) returns (concord.common.v1.User) {
+    option (google.api.http) = {
+      get: "/v1/users/{user_id}"
+    };
+  }
+  rpc GetUserByHandle(GetUserByHandleRequest) returns (concord.common.v1.User) {
+    option (google.api.http) = {
+      get: "/v1/users/handle/{handle}"
+    };
+  }
+  rpc UpdateProfile(UpdateProfileRequest) returns (concord.common.v1.User) {
+    option (google.api.http) = {
+      patch: "/v1/users/me"
+      body: "*"
+    };
+  }
+  rpc UpdateStatus(UpdateStatusRequest) returns (concord.common.v1.User) {
+    option (google.api.http) = {
+      put: "/v1/users/me/status"
+      body: "*"
+    };
+  }
+  rpc SearchUsers(SearchUsersRequest) returns (SearchUsersResponse) {
+    option (google.api.http) = {
+      get: "/v1/users/search"
+    };
+  }
+  rpc ListUsersByIDs(ListUsersByIDsRequest) returns (ListUsersByIDsResponse) {
+    option (google.api.http) = {
+      post: "/v1/users/batch"
+      body: "*"
+    };
+  }
 }

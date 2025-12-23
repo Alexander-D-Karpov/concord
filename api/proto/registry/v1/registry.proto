@@ -4,8 +4,9 @@ package concord.registry.v1;
 
 option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/registry/v1;registryv1";
 
-import "common/v1/types.proto";
+import "google/api/annotations.proto";
 import "google/protobuf/timestamp.proto";
+import "common/v1/types.proto";
 
 message RegisterServerRequest {
   concord.common.v1.VoiceServer server = 1;
@@ -37,7 +38,21 @@ message ListServersResponse {
 message EmptyResponse {}
 
 service RegistryService {
-  rpc RegisterServer(RegisterServerRequest) returns (RegisterServerResponse);
-  rpc Heartbeat(HeartbeatRequest) returns (EmptyResponse);
-  rpc ListServers(ListServersRequest) returns (ListServersResponse);
+  rpc RegisterServer(RegisterServerRequest) returns (RegisterServerResponse) {
+    option (google.api.http) = {
+      post: "/v1/registry/servers"
+      body: "*"
+    };
+  }
+  rpc Heartbeat(HeartbeatRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/registry/heartbeat"
+      body: "*"
+    };
+  }
+  rpc ListServers(ListServersRequest) returns (ListServersResponse) {
+    option (google.api.http) = {
+      get: "/v1/registry/servers"
+    };
+  }
 }

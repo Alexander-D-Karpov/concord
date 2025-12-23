@@ -2,6 +2,7 @@ package udp
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"github.com/Alexander-D-Karpov/concord/internal/voice/protocol"
 	"github.com/Alexander-D-Karpov/concord/internal/voice/router"
 	"github.com/Alexander-D-Karpov/concord/internal/voice/session"
+	"github.com/Alexander-D-Karpov/concord/internal/voice/telemetry"
 	"go.uber.org/zap"
 )
 
@@ -22,9 +24,24 @@ type Server struct {
 	router         *router.Router
 	validator      *voiceauth.Validator
 	logger         *zap.Logger
+	metrics        *telemetry.Metrics
 	stopChan       chan struct{}
 	wg             sync.WaitGroup
+
+	packetPool sync.Pool
+	workChan   chan *packetJob
 }
+
+type packetJob struct {
+	data []byte
+	addr *net.UDPAddr
+}
+
+const (
+	numWorkers   = 4
+	workChanSize = 10000
+	maxPacketLen = 1500
+)
 
 func NewServer(
 	host string,
@@ -33,6 +50,7 @@ func NewServer(
 	router *router.Router,
 	jwtManager *jwt.Manager,
 	logger *zap.Logger,
+	metrics *telemetry.Metrics,
 ) (*Server, error) {
 	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", host, port))
 	if err != nil {
@@ -59,18 +77,27 @@ func NewServer(
 		router:         router,
 		validator:      validator,
 		logger:         logger,
+		metrics:        metrics,
 		stopChan:       make(chan struct{}),
+		workChan:       make(chan *packetJob, workChanSize),
+		packetPool: sync.Pool{
+			New: func() interface{} {
+				return make([]byte, maxPacketLen)
+			},
+		},
 	}, nil
 }
 
 func (s *Server) Start(ctx context.Context) error {
 	s.logger.Info("UDP server starting", zap.String("address", s.conn.LocalAddr().String()))
 
-	numWorkers := 4
 	for i := 0; i < numWorkers; i++ {
 		s.wg.Add(1)
-		go s.readLoop(i)
+		go s.worker()
 	}
+
+	s.wg.Add(1)
+	go s.readLoop()
 
 	<-ctx.Done()
 	close(s.stopChan)
@@ -84,19 +111,15 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) readLoop(workerID int) {
+func (s *Server) readLoop() {
 	defer s.wg.Done()
-	buf := make([]byte, 65536)
 
 	for {
-		select {
-		case <-s.stopChan:
-			return
-		default:
-		}
+		buf := s.packetPool.Get().([]byte)
 
 		n, addr, err := s.conn.ReadFromUDP(buf)
 		if err != nil {
+			s.packetPool.Put(buf)
 			select {
 			case <-s.stopChan:
 				return
@@ -106,9 +129,38 @@ func (s *Server) readLoop(workerID int) {
 			}
 		}
 
+		if n > maxPacketLen {
+			s.packetPool.Put(buf)
+			s.logger.Warn("packet too large", zap.Int("size", n))
+			continue
+		}
+
 		packetData := make([]byte, n)
 		copy(packetData, buf[:n])
-		go s.handlePacket(packetData, addr)
+		s.packetPool.Put(buf)
+
+		select {
+		case s.workChan <- &packetJob{data: packetData, addr: addr}:
+		default:
+			if s.metrics != nil {
+				s.metrics.RecordPacketDropped()
+			}
+		}
+	}
+}
+
+func (s *Server) worker() {
+	defer s.wg.Done()
+
+	for {
+		select {
+		case job := <-s.workChan:
+			if job != nil {
+				s.handlePacket(job.data, job.addr)
+			}
+		case <-s.stopChan:
+			return
+		}
 	}
 }
 
@@ -117,9 +169,11 @@ func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
 		return
 	}
 
-	packetType := data[0]
+	if s.metrics != nil {
+		s.metrics.RecordPacketReceived(uint64(len(data)))
+	}
 
-	switch packetType {
+	switch data[0] {
 	case protocol.PacketTypeHello:
 		s.handleHello(data, addr)
 	case protocol.PacketTypeAudio, protocol.PacketTypeVideo:
@@ -130,9 +184,47 @@ func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
 		s.handleBye(data, addr)
 	case protocol.PacketTypeSpeaking:
 		s.handleSpeaking(data, addr)
+	case protocol.PacketTypeMediaState:
+		s.handleMediaState(data, addr)
+	case protocol.PacketTypeNack:
+		s.handleNack(data, addr)
+	case protocol.PacketTypePli:
+		s.handlePli(data, addr)
+	case protocol.PacketTypeRR:
+		s.handleReceiverReport(data, addr)
 	default:
-		s.logger.Debug("unknown packet type", zap.Uint8("type", packetType))
+		s.logger.Debug("unknown packet type", zap.Uint8("type", data[0]))
 	}
+}
+
+func (s *Server) handleMedia(data []byte, addr *net.UDPAddr) {
+	if len(data) < protocol.MediaHeaderSize {
+		s.logger.Debug("media packet too small", zap.Int("size", len(data)))
+		return
+	}
+
+	pkt, err := protocol.ParsePacket(data)
+	if err != nil {
+		s.logger.Debug("failed to parse packet", zap.Error(err))
+		return
+	}
+
+	// Route by SSRC (header is plaintext)
+	sess := s.sessionManager.GetBySSRC(pkt.Header.SSRC)
+	if sess == nil {
+		s.logger.Debug("unknown SSRC", zap.Uint32("ssrc", pkt.Header.SSRC))
+		return
+	}
+
+	// NAT rebinding: keep addrMap updated
+	s.sessionManager.BindAddr(sess.ID, addr)
+	s.sessionManager.Touch(sess.ID)
+
+	// IMPORTANT: store the on-the-wire packet bytes for NACK retransmit
+	sess.StoreForRetransmit(pkt.Header.Sequence, data)
+
+	// IMPORTANT: forward raw bytes (ciphertext) untouched
+	s.router.RouteMediaRaw(pkt.Header, data, addr, s.conn)
 }
 
 func (s *Server) handleHello(data []byte, addr *net.UDPAddr) {
@@ -148,36 +240,49 @@ func (s *Server) handleHello(data []byte, addr *net.UDPAddr) {
 		return
 	}
 
-	key, err := crypto.GenerateKey()
-	if err != nil {
-		s.logger.Error("failed to generate key", zap.Error(err))
-		return
+	var sessionCrypto *crypto.SessionCrypto
+	if hello.Crypto != nil && len(hello.Crypto.KeyMaterial) == crypto.KeySize {
+		var keyID uint8
+		if len(hello.Crypto.KeyID) > 0 {
+			keyID = hello.Crypto.KeyID[0]
+		}
+
+		sessionCrypto, err = crypto.NewSessionCrypto(
+			hello.Crypto.KeyMaterial,
+			hello.Crypto.NonceBase,
+			keyID,
+		)
+		if err != nil {
+			s.logger.Error("failed to create session crypto", zap.Error(err))
+			return
+		}
 	}
 
-	cipher, err := crypto.NewCipher(key)
-	if err != nil {
-		s.logger.Error("failed to create cipher", zap.Error(err))
-		return
+	existingSession := s.sessionManager.GetSessionByUserInRoom(claims.UserID, claims.RoomID)
+	if existingSession != nil {
+		s.broadcastParticipantLeft(existingSession.RoomID, existingSession.UserID, existingSession.SSRC, existingSession.VideoSSRC)
+		s.sessionManager.RemoveSession(existingSession.ID)
 	}
-
-	sess := s.sessionManager.CreateSession(claims.UserID, claims.RoomID, addr, cipher)
 
 	existingSessions := s.sessionManager.GetRoomSessions(claims.RoomID)
+
+	sess := s.sessionManager.CreateSession(claims.UserID, claims.RoomID, addr, sessionCrypto, hello.VideoEnabled)
+
 	participants := make([]protocol.ParticipantInfo, 0, len(existingSessions))
 	for _, existing := range existingSessions {
-		if existing.ID != sess.ID {
-			participants = append(participants, protocol.ParticipantInfo{
-				UserID:       existing.UserID,
-				SSRC:         existing.SSRC,
-				Muted:        existing.Muted,
-				VideoEnabled: existing.VideoEnabled,
-			})
-		}
+		participants = append(participants, protocol.ParticipantInfo{
+			UserID:       existing.UserID,
+			SSRC:         existing.SSRC,
+			VideoSSRC:    existing.VideoSSRC,
+			Muted:        existing.Muted,
+			VideoEnabled: existing.VideoEnabled,
+		})
 	}
 
 	welcome := protocol.WelcomePayload{
 		SessionID:    sess.ID,
 		SSRC:         sess.SSRC,
+		VideoSSRC:    sess.VideoSSRC,
 		Participants: participants,
 	}
 
@@ -187,37 +292,30 @@ func (s *Server) handleHello(data []byte, addr *net.UDPAddr) {
 		return
 	}
 
-	packet := make([]byte, 1+len(welcomeData))
-	packet[0] = protocol.PacketTypeWelcome
-	copy(packet[1:], welcomeData)
+	out := make([]byte, 1+len(welcomeData))
+	out[0] = protocol.PacketTypeWelcome
+	copy(out[1:], welcomeData)
 
-	if err := s.send(packet, addr); err != nil {
+	if err := s.send(out, addr); err != nil {
 		s.logger.Error("failed to send welcome", zap.Error(err))
 		return
 	}
+
+	s.broadcastParticipantJoined(claims.RoomID, sess)
 
 	s.logger.Info("session created",
 		zap.String("user_id", claims.UserID),
 		zap.String("room_id", claims.RoomID),
 		zap.Uint32("ssrc", sess.SSRC),
+		zap.Uint32("video_ssrc", sess.VideoSSRC),
 	)
 }
 
-func (s *Server) handleMedia(data []byte, addr *net.UDPAddr) {
-	if len(data) < 20 {
-		return
-	}
-
-	packet, err := protocol.ParsePacket(data)
-	if err != nil {
-		s.logger.Debug("failed to parse packet", zap.Error(err))
-		return
-	}
-
-	s.router.RoutePacket(packet, addr)
-}
-
 func (s *Server) handlePing(data []byte, addr *net.UDPAddr) {
+	if sess := s.sessionManager.GetByAddr(addr); sess != nil {
+		s.sessionManager.Touch(sess.ID)
+	}
+
 	pong := make([]byte, len(data))
 	pong[0] = protocol.PacketTypePong
 	copy(pong[1:], data[1:])
@@ -228,45 +326,227 @@ func (s *Server) handlePing(data []byte, addr *net.UDPAddr) {
 }
 
 func (s *Server) handleBye(data []byte, addr *net.UDPAddr) {
-	s.logger.Info("received bye", zap.String("addr", addr.String()))
+	if len(data) < 5 {
+		return
+	}
+
+	ssrc := binary.BigEndian.Uint32(data[1:5])
+
+	sess := s.sessionManager.GetBySSRC(ssrc)
+	if sess == nil {
+		return
+	}
+
+	roomID := sess.RoomID
+	userID := sess.UserID
+	videoSSRC := sess.VideoSSRC
+
+	s.sessionManager.RemoveSession(sess.ID)
+	s.broadcastParticipantLeft(roomID, userID, ssrc, videoSSRC)
+
+	s.logger.Info("session ended",
+		zap.String("user_id", userID),
+		zap.String("room_id", roomID),
+	)
 }
 
 func (s *Server) handleSpeaking(data []byte, addr *net.UDPAddr) {
 	var speaking protocol.SpeakingPayload
 	if err := json.Unmarshal(data[1:], &speaking); err != nil {
-		s.logger.Error("failed to unmarshal speaking", zap.Error(err))
 		return
 	}
 
-	sess := s.sessionManager.GetSession(speaking.SSRC)
-	if sess != nil {
-		sess.SetSpeaking(speaking.Speaking)
+	sess := s.sessionManager.GetBySSRC(speaking.SSRC)
+	if sess == nil {
+		return
+	}
 
-		// Broadcast to room
-		s.broadcastSpeaking(sess.RoomID, speaking)
+	sess.SetSpeaking(speaking.Speaking)
+	s.sessionManager.Touch(sess.ID)
+
+	s.broadcastSpeaking(sess.RoomID, speaking)
+}
+
+func (s *Server) handleMediaState(data []byte, addr *net.UDPAddr) {
+	var mediaState protocol.MediaStatePayload
+	if err := json.Unmarshal(data[1:], &mediaState); err != nil {
+		return
+	}
+
+	sess := s.sessionManager.GetBySSRC(mediaState.SSRC)
+	if sess == nil {
+		return
+	}
+
+	sess.SetMuted(mediaState.Muted)
+	sess.SetVideoEnabled(mediaState.VideoEnabled)
+	s.sessionManager.Touch(sess.ID)
+
+	s.broadcastMediaState(sess.RoomID, sess)
+}
+
+func (s *Server) handleNack(data []byte, addr *net.UDPAddr) {
+	nack, err := protocol.ParseNack(data)
+	if err != nil {
+		return
+	}
+
+	targetSess := s.sessionManager.GetBySSRC(nack.SSRC)
+	if targetSess == nil {
+		return
+	}
+
+	for _, seq := range nack.Sequences {
+		if cached := targetSess.GetForRetransmit(seq); cached != nil {
+			_ = s.send(cached, addr) // addr = requester
+		}
+	}
+}
+
+func (s *Server) handlePli(data []byte, addr *net.UDPAddr) {
+	pli, err := protocol.ParsePli(data)
+	if err != nil {
+		return
+	}
+
+	targetSess := s.sessionManager.GetBySSRC(pli.SSRC)
+	if targetSess == nil {
+		return
+	}
+
+	to := targetSess.GetAddr()
+	if to == nil {
+		return
+	}
+
+	_ = s.send(data, to)
+}
+
+func (s *Server) handleReceiverReport(data []byte, addr *net.UDPAddr) {
+	rr, err := protocol.ParseReceiverReport(data)
+	if err != nil {
+		return
+	}
+
+	targetSess := s.sessionManager.GetBySSRC(rr.SSRC)
+	if targetSess == nil {
+		return
+	}
+
+	to := targetSess.GetAddr()
+	if to == nil {
+		return
+	}
+
+	_ = s.send(data, to)
+}
+
+func (s *Server) broadcastParticipantJoined(roomID string, newSession *session.Session) {
+	sessions := s.sessionManager.GetRoomSessions(roomID)
+
+	payload := protocol.MediaStatePayload{
+		SSRC:         newSession.SSRC,
+		VideoSSRC:    newSession.VideoSSRC,
+		UserID:       newSession.UserID,
+		RoomID:       roomID,
+		Muted:        newSession.Muted,
+		VideoEnabled: newSession.VideoEnabled,
+	}
+
+	payloadData, _ := json.Marshal(payload)
+	packet := make([]byte, 1+len(payloadData))
+	packet[0] = protocol.PacketTypeMediaState
+	copy(packet[1:], payloadData)
+
+	for _, sess := range sessions {
+		if sess.ID == newSession.ID {
+			continue
+		}
+		to := sess.GetAddr()
+		if to == nil {
+			continue
+		}
+		_ = s.send(packet, to)
+	}
+}
+
+func (s *Server) broadcastParticipantLeft(roomID, userID string, ssrc uint32, videoSSRC uint32) {
+	sessions := s.sessionManager.GetRoomSessions(roomID)
+
+	payload := protocol.ParticipantLeftPayload{
+		UserID:    userID,
+		RoomID:    roomID,
+		SSRC:      ssrc,
+		VideoSSRC: videoSSRC,
+	}
+
+	b, _ := json.Marshal(payload)
+	pkt := make([]byte, 1+len(b))
+	pkt[0] = protocol.PacketTypeParticipantLeft
+	copy(pkt[1:], b)
+
+	for _, sess := range sessions {
+		to := sess.GetAddr()
+		if to == nil {
+			continue
+		}
+		_ = s.send(pkt, to)
 	}
 }
 
 func (s *Server) broadcastSpeaking(roomID string, speaking protocol.SpeakingPayload) {
 	sessions := s.sessionManager.GetRoomSessions(roomID)
 
-	payload, err := json.Marshal(speaking)
-	if err != nil {
-		return
-	}
-
+	payload, _ := json.Marshal(speaking)
 	packet := make([]byte, 1+len(payload))
 	packet[0] = protocol.PacketTypeSpeaking
 	copy(packet[1:], payload)
 
 	for _, sess := range sessions {
-		if err := s.send(packet, sess.GetAddr()); err != nil {
-			s.logger.Debug("failed to send speaking notification", zap.Error(err))
+		if sess.SSRC == speaking.SSRC {
+			continue
 		}
+		to := sess.GetAddr()
+		if to == nil {
+			continue
+		}
+		_ = s.send(packet, to)
+	}
+}
+
+func (s *Server) broadcastMediaState(roomID string, sess *session.Session) {
+	sessions := s.sessionManager.GetRoomSessions(roomID)
+
+	payload := protocol.MediaStatePayload{
+		SSRC:         sess.SSRC,
+		VideoSSRC:    sess.VideoSSRC,
+		UserID:       sess.UserID,
+		RoomID:       roomID,
+		Muted:        sess.Muted,
+		VideoEnabled: sess.VideoEnabled,
+	}
+
+	payloadData, _ := json.Marshal(payload)
+	packet := make([]byte, 1+len(payloadData))
+	packet[0] = protocol.PacketTypeMediaState
+	copy(packet[1:], payloadData)
+
+	for _, other := range sessions {
+		if other.ID == sess.ID {
+			continue
+		}
+		to := other.GetAddr()
+		if to == nil {
+			continue
+		}
+		_ = s.send(packet, to)
 	}
 }
 
 func (s *Server) send(data []byte, addr *net.UDPAddr) error {
 	_, err := s.conn.WriteToUDP(data, addr)
+	if err == nil && s.metrics != nil {
+		s.metrics.RecordPacketSent(uint64(len(data)))
+	}
 	return err
 }

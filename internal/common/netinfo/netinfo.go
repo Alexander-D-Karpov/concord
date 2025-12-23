@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -22,22 +23,23 @@ type Advertised struct {
 func ComputeAdvertised(ctx context.Context, userConfiguredHost, udpBindHost string, port int) Advertised {
 	adv := Advertised{Port: port}
 
-	// 0) If user configured a public host (config wins)
 	if h := strings.TrimSpace(userConfiguredHost); h != "" {
-		adv.PublicHost = trimScheme(h)
+		h = trimScheme(h)
+		h = stripPort(h)
+		adv.PublicHost = h
 		adv.Source = "config"
 	} else if env := strings.TrimSpace(os.Getenv("CONCORD_PUBLIC_HOST")); env != "" {
-		adv.PublicHost = trimScheme(env)
+		h := trimScheme(env)
+		h = stripPort(h)
+		adv.PublicHost = h
 		adv.Source = "env"
 	} else {
-		// 1) Try to detect public IP via HTTP (short timeouts)
 		if ip, err := detectPublicIP(ctx); err == nil && ip != "" {
 			adv.PublicHost = ip
 			adv.Source = "http"
 		}
 	}
 
-	// 2) Determine a LAN IP fallback
 	if lan, err := detectLANIPPreferOutbound(); err == nil && lan != "" {
 		adv.LANHost = lan
 	} else if lan, err := firstPrivateIPv4(); err == nil && lan != "" {
@@ -47,7 +49,6 @@ func ComputeAdvertised(ctx context.Context, userConfiguredHost, udpBindHost stri
 		adv.Notes = append(adv.Notes, "Could not find a LAN IP; falling back to 127.0.0.1.")
 	}
 
-	// 3) Notes / hints
 	if adv.PublicHost == "" {
 		adv.Source = "lan"
 		adv.Notes = append(adv.Notes,
@@ -65,7 +66,19 @@ func trimScheme(h string) string {
 	h = strings.TrimSpace(h)
 	h = strings.TrimPrefix(h, "https://")
 	h = strings.TrimPrefix(h, "http://")
+	h = strings.TrimPrefix(h, "udp://")
+	h = strings.TrimPrefix(h, "tcp://")
 	return strings.TrimSuffix(h, "/")
+}
+
+func stripPort(hostWithPort string) string {
+	if idx := strings.LastIndex(hostWithPort, ":"); idx != -1 {
+		potentialPort := hostWithPort[idx+1:]
+		if _, err := strconv.Atoi(potentialPort); err == nil {
+			return hostWithPort[:idx]
+		}
+	}
+	return hostWithPort
 }
 
 func isAllInterfaces(h string) bool {

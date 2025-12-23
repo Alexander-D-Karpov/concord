@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -13,14 +14,15 @@ func NewAsidePattern(cache *Cache) *AsidePattern {
 	return &AsidePattern{cache: cache}
 }
 
-func (a *AsidePattern) GetOrLoad(ctx context.Context, key string, ttl time.Duration, loader func() (interface{}, error)) (interface{}, error) {
+func (a *AsidePattern) GetOrLoad(ctx context.Context, key string, ttl time.Duration,
+	loader func() (interface{}, error)) (interface{}, error) {
 	var result interface{}
 	err := a.cache.Get(ctx, key, &result)
 	if err == nil {
 		return result, nil
 	}
 
-	if err != ErrCacheMiss {
+	if !errors.Is(err, ErrCacheMiss) {
 		return nil, err
 	}
 
