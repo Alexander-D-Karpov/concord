@@ -141,8 +141,8 @@ func toProtoUser(user *User) *commonv1.User {
 		Status:      user.Status,
 	}
 
-	if user.Bio != nil {
-		proto.Bio = *user.Bio
+	if user.Bio != "" {
+		proto.Bio = user.Bio
 	}
 
 	return proto

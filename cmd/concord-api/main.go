@@ -12,8 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Alexander-D-Karpov/concord/internal/readtracking"
 	"github.com/Alexander-D-Karpov/concord/internal/security"
 	"github.com/Alexander-D-Karpov/concord/internal/swagger"
+	"github.com/Alexander-D-Karpov/concord/internal/typing"
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -185,18 +187,30 @@ func run() error {
 
 	snowflakeGen := infra.NewSnowflakeGenerator(1)
 	usersRepo := users.NewRepository(database.Pool)
+	if cacheClient != nil {
+		usersRepo = users.NewRepositoryWithCache(database.Pool, cacheClient)
+	}
 	eventsHub := events.NewHub(logger, database.Pool, aside)
 
 	usersService := users.NewService(usersRepo, eventsHub)
 	usersHandler := users.NewHandler(usersService)
 
 	roomsRepo := rooms.NewRepository(database.Pool)
+	if cacheClient != nil {
+		roomsRepo = rooms.NewRepositoryWithCache(database.Pool, cacheClient)
+	}
 	roomsService := rooms.NewService(roomsRepo, eventsHub, aside)
 	roomsHandler := rooms.NewHandler(roomsService)
 
+	readTrackingRepo := readtracking.NewRepository(database.Pool)
+	readTrackingSvc := readtracking.NewService(readTrackingRepo, eventsHub)
+
+	typingRepo := typing.NewRepository(database.Pool)
+	typingSvc := typing.NewService(typingRepo, eventsHub, usersRepo)
+
 	messagesRepo := chat.NewRepository(database.Pool, snowflakeGen)
 	chatService := chat.NewService(messagesRepo, roomsRepo, eventsHub, aside)
-	chatHandler := chat.NewHandler(chatService, storageService)
+	chatHandler := chat.NewHandler(chatService, storageService, readTrackingSvc, typingSvc)
 
 	membershipService := membership.NewService(roomsRepo, eventsHub, aside)
 	membershipHandler := membership.NewHandler(membershipService)
@@ -206,7 +220,12 @@ func run() error {
 	voiceAssignService := voiceassign.NewService(database.Pool, jwtManager, cacheClient)
 	callHandler := call.NewHandler(voiceAssignService, roomsRepo, eventsHub, logger)
 
+	go voiceAssignService.StartHealthChecker(ctx, 30*time.Second)
+
 	friendsRepo := friends.NewRepository(database.Pool)
+	if cacheClient != nil {
+		friendsRepo = friends.NewRepositoryWithCache(database.Pool, cacheClient)
+	}
 	friendsService := friends.NewService(friendsRepo, eventsHub, usersRepo)
 	friendsHandler := friends.NewHandler(friendsService)
 
@@ -214,8 +233,11 @@ func run() error {
 	adminHandler := admin.NewHandler(adminService)
 
 	dmRepo := dm.NewRepository(database.Pool)
-	dmService := dm.NewService(dmRepo, usersRepo, eventsHub, logger)
-	dmHandler := dm.NewHandler(dmService)
+	dmMsgRepo := dm.NewMessageRepository(database.Pool, snowflakeGen)
+	dmService := dm.NewService(dmRepo, dmMsgRepo, usersRepo, eventsHub, voiceAssignService, logger)
+	dmHandler := dm.NewHandler(dmService, storageService)
+	dmHandler.SetReadTrackingService(readTrackingSvc)
+	dmHandler.SetTypingService(typingSvc)
 
 	var oauthManager *oauth.Manager
 	if len(cfg.Auth.OAuth) > 0 {
@@ -344,6 +366,21 @@ func run() error {
 		logger.Info("HTTP server starting", zap.String("address", httpServer.Addr))
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errChan <- fmt.Errorf("http server: %w", err)
+		}
+	}()
+
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_, _ = typingSvc.CleanupExpired(cleanupCtx)
+				cancel()
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 

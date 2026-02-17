@@ -522,3 +522,10 @@ func (h *Hub) Shutdown(ctx context.Context) error {
 	h.logger.Info("all clients force-disconnected")
 	return nil
 }
+
+func (h *Hub) RoomHasSubscribers(roomID string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	subs, ok := h.rooms[roomID]
+	return ok && len(subs) > 0
+}

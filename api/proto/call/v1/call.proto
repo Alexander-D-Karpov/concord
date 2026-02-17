@@ -37,6 +37,7 @@ message JoinVoiceResponse {
   CodecHint codec = 4;
   CryptoSuite crypto = 5;
   repeated Participant participants = 6;
+  uint32 screen_ssrc = 7;
 }
 
 message Participant {
@@ -44,6 +45,9 @@ message Participant {
   uint32 ssrc = 2;
   bool muted = 3;
   bool video_enabled = 4;
+  bool screen_sharing = 5;
+  uint32 video_ssrc = 6;
+  uint32 screen_ssrc = 7;
 }
 
 message LeaveVoiceRequest {
@@ -54,7 +58,8 @@ message SetMediaPrefsRequest {
   string room_id = 1;
   bool audio_only = 2;
   bool video_enabled = 3;
-  bool muted = 4;
+  bool screen_sharing = 4;
+  bool muted = 5;
 }
 
 message EmptyResponse {}
@@ -67,8 +72,9 @@ message VoiceParticipant {
   string user_id = 1;
   bool muted = 2;
   bool video_enabled = 3;
-  bool speaking = 4;
-  google.protobuf.Timestamp joined_at = 5;
+  bool screen_sharing = 4;
+  bool speaking = 5;
+  google.protobuf.Timestamp joined_at = 6;
 }
 
 message GetVoiceStatusResponse {

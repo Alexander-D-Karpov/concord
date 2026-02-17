@@ -1,147 +1,79 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:14-alpine
-    container_name: concord-postgres
+    restart: always
+    env_file:
+      - ../.env
     environment:
-      POSTGRES_DB: concord
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-concord}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 5s
       timeout: 5s
       retries: 5
-    networks:
-      - concord-network
 
   redis:
     image: redis:7-alpine
-    container_name: concord-redis
-    command: redis-server --appendonly yes
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
+    restart: always
+    env_file:
+      - ../.env
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
       retries: 5
-    networks:
-      - concord-network
 
   api:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.api
-    container_name: concord-api
+    restart: always
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    env_file:
+      - ../.env
     environment:
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_USER: postgres
-      DB_PASSWORD: postgres
-      DB_NAME: concord
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_ENABLED: "true"
-      GRPC_PORT: 9000
-      SERVER_PORT: 8080
-      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-in-production}
-      VOICE_JWT_SECRET: ${VOICE_JWT_SECRET:-dev-voice-secret}
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      LOG_FORMAT: json
-      RATE_LIMIT_ENABLED: "true"
-      RATE_LIMIT_REQUESTS_PER_MINUTE: 60
-      RATE_LIMIT_BURST: 10
-      METRICS_PORT: 9100
-      HEALTH_PORT: 8081
+      - DB_HOST=postgres
+      - REDIS_HOST=redis
+      - SERVER_PORT=${SERVER_PORT:-8080}
+      - GRPC_PORT=${GRPC_PORT:-9000}
+      - REGISTRY_URL=localhost:${GRPC_PORT:-9000}
     ports:
-      - "9000:9000"   # gRPC
-      - "8080:8080"   # HTTP Gateway
-      - "9100:9100"   # Metrics
-      - "8081:8081"   # Health
-    restart: unless-stopped
-    networks:
-      - concord-network
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - "${SERVER_PORT:-8080}:${SERVER_PORT:-8080}" # REST
+      - "${GRPC_PORT:-9000}:${GRPC_PORT:-9000}"     # gRPC
+      - "${METRICS_PORT:-9100}:${METRICS_PORT:-9100}" # Metrics
+      - "${HEALTH_PORT:-8081}:${HEALTH_PORT:-8081}"   # Health
 
   voice:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.voice
-    container_name: concord-voice
+    restart: always
     depends_on:
-      - api
+      api:
+        condition: service_started
+    env_file:
+      - ../.env
     environment:
-      VOICE_UDP_HOST: 0.0.0.0
-      VOICE_UDP_PORT_START: 50000
-      VOICE_CONTROL_PORT: 9001
-      VOICE_REGION: ${VOICE_REGION:-default}
-      VOICE_SECRET: ${VOICE_SECRET:-dev-voice-server-secret}
-      REGISTRY_URL: api:9000
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      LOG_FORMAT: json
-      VOICE_METRICS_PORT: 9101
-      VOICE_HEALTH_PORT: 8082
+      - REGISTRY_URL=api:${GRPC_PORT:-9000}
+      - VOICE_CONTROL_PORT=${VOICE_CONTROL_PORT:-9001}
+      - VOICE_METRICS_PORT=${VOICE_METRICS_PORT:-9101}
+      - VOICE_HEALTH_PORT=${VOICE_HEALTH_PORT:-8082}
+      # Voice needs to know its public IP (host) for the client to connect via UDP
+      # In dev, this is 127.0.0.1. In prod, set VOICE_PUBLIC_HOST in .env
+      - VOICE_PUBLIC_HOST=${VOICE_PUBLIC_HOST:-127.0.0.1}
     ports:
-      - "50000-50100:50000-50100/udp"  # UDP for voice
-      - "9001:9001"                     # Control
-      - "9101:9101"                     # Metrics
-      - "8082:8082"                     # Health
-    restart: unless-stopped
-    networks:
-      - concord-network
-
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: concord-prometheus
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-    ports:
-      - "9090:9090"
-    networks:
-      - concord-network
-
-  grafana:
-    image: grafana/grafana:latest
-    container_name: concord-grafana
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
-      - GF_USERS_ALLOW_SIGN_UP=false
-    volumes:
-      - grafana_data:/var/lib/grafana
-    ports:
-      - "3000:3000"
-    depends_on:
-      - prometheus
-    networks:
-      - concord-network
+      - "${VOICE_CONTROL_PORT:-9001}:${VOICE_CONTROL_PORT:-9001}"
+      - "${VOICE_UDP_PORT_START:-50000}-${VOICE_UDP_PORT_END:-50100}:${VOICE_UDP_PORT_START:-50000}-${VOICE_UDP_PORT_END:-50100}/udp"
+      - "${VOICE_METRICS_PORT:-9101}:${VOICE_METRICS_PORT:-9101}"
+      - "${VOICE_HEALTH_PORT:-8082}:${VOICE_HEALTH_PORT:-8082}"
 
 volumes:
   postgres_data:
-  redis_data:
-  prometheus_data:
-  grafana_data:
-
-networks:
-  concord-network:
-    driver: bridge

@@ -43,7 +43,7 @@ protoc $INCLUDES \
     --go_opt=paths=source_relative \
     --go-grpc_out=../gen/go \
     --go-grpc_opt=paths=source_relative \
-    "$dir"/*.proto
+    stream/v1/*.proto
 
 echo "Generating OpenAPI spec..."
 protoc $INCLUDES \

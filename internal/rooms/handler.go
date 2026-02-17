@@ -145,12 +145,12 @@ func toProtoRoom(room *Room) *commonv1.Room {
 		protoRoom.VoiceServerId = room.VoiceServerID.String()
 	}
 
-	if room.Region != nil {
-		protoRoom.Region = *room.Region
+	if room.Region != "" {
+		protoRoom.Region = room.Region
 	}
 
-	if room.Description != nil {
-		protoRoom.Description = *room.Description
+	if room.Description != "" {
+		protoRoom.Description = room.Description
 	}
 
 	return protoRoom

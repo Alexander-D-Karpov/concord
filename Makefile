@@ -1,4 +1,9 @@
-.PHONY: proto build clean test test-unit test-integration run-api run-voice migrate docker-build lint deps all test-cleanup
+.PHONY: proto build clean test test-unit test-integration run-api run-voice migrate docker-build lint deps all test-cleanup docker-run docker-stop docker-logs
+
+ifneq (,$(wildcard ./.env))
+    include .env
+    export
+endif
 
 proto:
 	@sh scripts/gen_proto.sh
@@ -43,6 +48,18 @@ docker-build:
 	@docker build -f deploy/Dockerfile.api -t concord-api:latest .
 	@docker build -f deploy/Dockerfile.voice -t concord-voice:latest .
 
+docker-run:
+	@echo "Starting Docker environment (rebuilding if necessary)..."
+	@docker-compose -f deploy/docker-compose.yml --env-file .env up --build -d
+	@echo "Environment is up. Use 'make docker-logs' to follow logs."
+
+docker-stop:
+	@echo "Stopping Docker environment..."
+	@docker-compose -f deploy/docker-compose.yml --env-file .env down
+
+docker-logs:
+	@docker-compose -f deploy/docker-compose.yml --env-file .env logs -f
+
 lint:
 	@golangci-lint run ./...
 
@@ -56,4 +73,4 @@ install-tools:
 	@go install github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-grpc-gateway@latest
 	@go install github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-openapiv2@latest
 
-all: proto build
+all: deps proto build

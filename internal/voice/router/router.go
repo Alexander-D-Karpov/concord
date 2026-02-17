@@ -211,21 +211,44 @@ func (r *Router) RouteMediaRaw(h protocol.MediaHeader, raw []byte, fromAddr *net
 	}
 
 	pktType := h.Type
+	routedCount := 0
 
 	for _, dst := range sessions {
-		to := dst.GetAddr()
-		if to == nil || sameUDPAddr(to, fromAddr) {
+		if dst.ID == sender.ID {
 			continue
 		}
 
-		if pktType == protocol.PacketTypeVideo && !dst.VideoEnabled {
+		to := dst.GetAddr()
+		if to == nil {
+			continue
+		}
+
+		// Skip if sender is muted (for audio)
+		if pktType == protocol.PacketTypeAudio && sender.Muted {
+			continue
+		}
+
+		// Check subscription - if dst has explicit subscriptions, filter
+		if !dst.IsSubscribedTo(h.SSRC) {
 			continue
 		}
 
 		select {
 		case r.sendQueue <- &sendTask{data: raw, addr: to, conn: conn}:
+			routedCount++
 		default:
-			r.logger.Warn("send queue full, dropping packet", zap.Uint32("ssrc", dst.SSRC))
+			r.logger.Warn("send queue full, dropping packet",
+				zap.Uint32("ssrc", h.SSRC),
+				zap.String("to", to.String()),
+			)
 		}
+	}
+
+	if routedCount > 0 && h.Sequence%1000 == 0 {
+		r.logger.Debug("routed media packet",
+			zap.Uint32("ssrc", h.SSRC),
+			zap.Uint8("type", pktType),
+			zap.Int("recipients", routedCount),
+		)
 	}
 }

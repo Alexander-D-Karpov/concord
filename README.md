@@ -1,69 +1,59 @@
-# Concord - Discord-like Voice & Chat Platform
+# Concord
 
-A high-performance, production-ready voice and chat platform built with Go, featuring real-time messaging and voice&video communication.
+A high-performance voice and chat platform built with Go, featuring real-time messaging and voice/video communication.
 
 ## Features
 
-### Core Features
-- **JWT-based Authentication** with refresh tokens
-- **OAuth 2.0 Integration** (Google, GitHub)
-- **Real-time Chat** with message persistence
-- **Voice Communication** over UDP with encryption
-- **Room Management** with role-based access control
-- **Redis Caching** for performance optimization
-- **Rate Limiting** to prevent abuse
-- **Admin Controls** (kick, ban, mute)
-
-### Technical Features
-- **gRPC API** with bidirectional streaming
-- **PostgreSQL** with Snowflake IDs for message ordering
-- **ChaCha20-Poly1305** encryption for voice
-- **SFU-style** media forwarding
-- **Comprehensive logging** with structured output
-- **Metrics & Observability** with Prometheus
+- **Authentication** - JWT with refresh tokens, OAuth 2.0 (Google, GitHub)
+- **Real-time Chat** - Messages with persistence, reactions, threads, pins
+- **Voice Communication** - UDP-based with ChaCha20-Poly1305 encryption
+- **Direct Messages** - Private conversations with read receipts
+- **Room Management** - Role-based permissions, invites, admin controls
+- **Friend System** - Requests, blocking, presence status
+- **Read Tracking** - Efficient unread count tracking using Snowflake IDs
+- **Typing Indicators** - Real-time typing status in rooms and DMs
+- **Redis Caching** - Performance optimization and rate limiting
+- **Prometheus Metrics** - Full observability
 
 ## Architecture
-
 ```
 ┌─────────────────┐         ┌─────────────────┐
 │  Native Client  │ ◄─────► │  Main Backend   │
-│ (Desktop/Mobile)│  gRPC   │    (Go)         │
-│                 │         │  Auth, Rooms    │
-│  - UI           │         │  Chat, Admin    │
-│  - gRPC stream  │         │                 │
-│  - UDP media    │         └────────┬────────┘
-└────────┬────────┘                  │
-         │                           │ PostgreSQL
-         │ UDP media            Redis Cache
-         │ (encrypted)               │
-         ▼                           ▼
-┌─────────────────┐         ┌─────────────────┐
-│  Voice CDN      │         │   PostgreSQL    │
-│   (Go, UDP)     │         │   Messages      │
-│  - SFU relay    │         │   Rooms         │
-│  - Encryption   │         │   Users         │
-│  - QoS          │         └─────────────────┘
+│ (Desktop/Mobile)│  gRPC   │  (concord-api)  │
+│                 │         │                 │
+│  - UI           │         │  - Auth         │
+│  - gRPC stream  │         │  - Rooms/Chat   │
+│  - UDP media    │         │  - DMs/Friends  │
+└────────┬────────┘         └────────┬────────┘
+         │                           │
+         │ UDP                  PostgreSQL
+         │ (encrypted)          Redis
+         ▼                           │
+┌─────────────────┐                  │
+│  Voice Server   │                  │
+│ (concord-voice) │                  │
+│                 │                  │
+│  - SFU relay    │◄─────────────────┘
+│  - Encryption   │     Registry
 └─────────────────┘
 ```
 
 ### Components
 
-#### Main Backend (`concord-api`)
+#### Main Backend (concord-api)
 - gRPC server for all API operations
 - JWT authentication with OAuth support
-- Real-time event streaming
+- Real-time event streaming via bidirectional gRPC
 - Message persistence with Snowflake IDs
 - Redis caching for frequently accessed data
-- Rate limiting per user/IP
-- Admin operations
+- Efficient read tracking using last-read positions
 
-#### Voice CDN (`concord-voice`)
+#### Voice Server (concord-voice)
 - UDP-based media relay
 - ChaCha20-Poly1305 encryption
 - SFU (Selective Forwarding Unit) architecture
 - Audio-first QoS
 - Session management
-- Standalone operation
 
 ## Quick Start
 
@@ -71,175 +61,109 @@ A high-performance, production-ready voice and chat platform built with Go, feat
 
 - Go 1.22+
 - PostgreSQL 14+
-- Redis 7+ (optional)
+- Redis 7+
 - Protocol Buffers compiler
-- Docker (optional)
 
 ### Setup
-
-1. **Clone the repository**
 ```bash
+# Clone repository
 git clone https://github.com/Alexander-D-Karpov/concord
 cd concord
-```
 
-2. **Install dependencies**
-```bash
+# Install dependencies
 make deps
 make install-tools
-```
-
-3. **Generate protobuf code**
-```bash
 make proto
-```
 
-4. **Configure environment**
-```bash
+# Configure environment
 cp .env.example .env
-```
+# Edit .env with your settings
 
-5. **Start dependencies**
-```bash
+# Start infrastructure
 docker-compose -f deploy/docker-compose.yml up -d postgres redis
 
-# Or install PostgreSQL and Redis locally
-```
-
-6. **Build and run**
-```bash
+# Build and run
 make build
-
-# Run API
 ./bin/concord-api
-
-# Run Voice (in another terminal)
 ./bin/concord-voice
 ```
 
 ## Configuration
 
-### Main API Configuration
+### Main API
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `GRPC_PORT` | gRPC server port | `9090` |
+| `GRPC_PORT` | gRPC server port | `9000` |
+| `SERVER_PORT` | HTTP gateway port | `8080` |
 | `DB_HOST` | PostgreSQL host | `localhost` |
 | `DB_PORT` | PostgreSQL port | `5432` |
 | `DB_NAME` | Database name | `concord` |
-| `JWT_SECRET` | JWT signing secret | Change in production |
+| `JWT_SECRET` | JWT signing secret | Required |
 | `REDIS_HOST` | Redis host | `localhost` |
 | `REDIS_ENABLED` | Enable Redis caching | `true` |
 | `RATE_LIMIT_ENABLED` | Enable rate limiting | `true` |
-| `RATE_LIMIT_REQUESTS_PER_MINUTE` | Rate limit | `60` |
+| `RATE_LIMIT_REQUESTS_PER_MINUTE` | Rate limit | `120` |
 
-### Voice Server Configuration
+### Voice Server
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `VOICE_UDP_HOST` | UDP bind address | `0.0.0.0` |
 | `VOICE_UDP_PORT_START` | Starting UDP port | `50000` |
-| `VOICE_REGION` | Server region | `ru-west` |
+| `VOICE_REGION` | Server region | `ru-west-1` |
 | `VOICE_PUBLIC_HOST` | Public hostname/IP | Auto-detected |
-| `REGISTRY_URL` | Main API address | `localhost:9090` |
+| `REGISTRY_URL` | Main API address | `localhost:9000` |
 
-## Monitoring
-
-### Prometheus Metrics
-
-The application exposes Prometheus metrics on:
-- API: `http://localhost:9090/metrics`
-- Voice: `http://localhost:9091/metrics`
+## Development
+```bash
+make test          # Run all tests
+make test-unit     # Run unit tests
+make test-integration # Run integration tests
+make lint          # Run linter
+make build         # Build binaries
+make proto         # Generate protobuf
+make docker-build  # Build Docker images
+```
 
 ## Deployment
 
 ### Docker
-
 ```bash
 make docker-build
-
 docker-compose -f deploy/docker-compose.yml up -d
 ```
 
-### Manual Deployment
-
-1. Build binaries: `make build`
-2. Set up PostgreSQL and Redis
-3. Configure environment variables
-4. Run migrations (automatic on startup)
-5. Start services
-
-### Environment Variables for Production
-
+### Production Configuration
 ```bash
-# Security
+# Required secrets
 JWT_SECRET=<strong-random-secret>
 VOICE_JWT_SECRET=<another-strong-secret>
 VOICE_SECRET=<voice-server-secret>
 
+# Database
 DB_HOST=your-postgres-host
 DB_PASSWORD=<strong-password>
 
+# Redis
 REDIS_HOST=your-redis-host
 REDIS_PASSWORD=<redis-password>
 
+# Logging
 LOG_LEVEL=info
 LOG_FORMAT=json
 ```
 
-## API Documentation
+## Monitoring
 
-### Authentication
+| Endpoint | Description |
+|----------|-------------|
+| `:9100/metrics` | API Prometheus metrics |
+| `:8081/health` | API health check |
+| `:9101/metrics` | Voice server metrics |
+| `:8082/health` | Voice health check |
 
-```protobuf
-// Register a new user
-rpc Register(RegisterRequest) returns (Token);
 
-// Login with password
-rpc LoginPassword(LoginPasswordRequest) returns (Token);
+## License
 
-// Login with OAuth
-rpc LoginOAuth(LoginOAuthRequest) returns (Token);
-
-// Refresh access token
-rpc Refresh(RefreshRequest) returns (Token);
-
-// Logout
-rpc Logout(LogoutRequest) returns (EmptyResponse);
-```
-
-### Rooms & Chat
-
-```protobuf
-// Create a room
-rpc CreateRoom(CreateRoomRequest) returns (Room);
-
-// Send a message
-rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
-
-// Stream events
-rpc EventStream(stream ClientEvent) returns (stream ServerEvent);
-```
-
-### Voice
-
-```protobuf
-// Join voice channel
-rpc JoinVoice(JoinVoiceRequest) returns (JoinVoiceResponse);
-
-// Leave voice channel
-rpc LeaveVoice(LeaveVoiceRequest) returns (EmptyResponse);
-```
-
-### Admin
-
-```protobuf
-// Kick user from room
-rpc Kick(KickRequest) returns (EmptyResponse);
-
-// Ban user from room
-rpc Ban(BanRequest) returns (EmptyResponse);
-
-// Mute user in voice
-rpc Mute(MuteRequest) returns (EmptyResponse);
-```
+MIT

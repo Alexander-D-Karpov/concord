@@ -192,9 +192,25 @@ func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
 		s.handlePli(data, addr)
 	case protocol.PacketTypeRR:
 		s.handleReceiverReport(data, addr)
+	case protocol.PacketTypeSubscribe:
+		s.handleSubscribe(data, addr)
 	default:
 		s.logger.Debug("unknown packet type", zap.Uint8("type", data[0]))
 	}
+}
+
+func (s *Server) handleSubscribe(data []byte, addr *net.UDPAddr) {
+	sess := s.sessionManager.GetByAddr(addr)
+	if sess == nil {
+		return
+	}
+
+	var payload protocol.SubscribePayload
+	if err := json.Unmarshal(data[1:], &payload); err != nil {
+		return
+	}
+
+	sess.UpdateSubscriptions(payload.Subscriptions)
 }
 
 func (s *Server) handleMedia(data []byte, addr *net.UDPAddr) {
@@ -271,11 +287,13 @@ func (s *Server) handleHello(data []byte, addr *net.UDPAddr) {
 	participants := make([]protocol.ParticipantInfo, 0, len(existingSessions))
 	for _, existing := range existingSessions {
 		participants = append(participants, protocol.ParticipantInfo{
-			UserID:       existing.UserID,
-			SSRC:         existing.SSRC,
-			VideoSSRC:    existing.VideoSSRC,
-			Muted:        existing.Muted,
-			VideoEnabled: existing.VideoEnabled,
+			UserID:        existing.UserID,
+			SSRC:          existing.SSRC,
+			VideoSSRC:     existing.VideoSSRC,
+			ScreenSSRC:    existing.ScreenSSRC,
+			Muted:         existing.Muted,
+			VideoEnabled:  existing.VideoEnabled,
+			ScreenSharing: existing.ScreenSharing,
 		})
 	}
 
@@ -283,6 +301,7 @@ func (s *Server) handleHello(data []byte, addr *net.UDPAddr) {
 		SessionID:    sess.ID,
 		SSRC:         sess.SSRC,
 		VideoSSRC:    sess.VideoSSRC,
+		ScreenSSRC:   sess.ScreenSSRC,
 		Participants: participants,
 	}
 
@@ -308,6 +327,7 @@ func (s *Server) handleHello(data []byte, addr *net.UDPAddr) {
 		zap.String("room_id", claims.RoomID),
 		zap.Uint32("ssrc", sess.SSRC),
 		zap.Uint32("video_ssrc", sess.VideoSSRC),
+		zap.Uint32("screen_ssrc", sess.ScreenSSRC),
 	)
 }
 
@@ -380,6 +400,7 @@ func (s *Server) handleMediaState(data []byte, addr *net.UDPAddr) {
 
 	sess.SetMuted(mediaState.Muted)
 	sess.SetVideoEnabled(mediaState.VideoEnabled)
+	sess.SetScreenSharing(mediaState.ScreenSharing)
 	s.sessionManager.Touch(sess.ID)
 
 	s.broadcastMediaState(sess.RoomID, sess)
@@ -445,12 +466,14 @@ func (s *Server) broadcastParticipantJoined(roomID string, newSession *session.S
 	sessions := s.sessionManager.GetRoomSessions(roomID)
 
 	payload := protocol.MediaStatePayload{
-		SSRC:         newSession.SSRC,
-		VideoSSRC:    newSession.VideoSSRC,
-		UserID:       newSession.UserID,
-		RoomID:       roomID,
-		Muted:        newSession.Muted,
-		VideoEnabled: newSession.VideoEnabled,
+		SSRC:          newSession.SSRC,
+		VideoSSRC:     newSession.VideoSSRC,
+		ScreenSSRC:    newSession.ScreenSSRC,
+		UserID:        newSession.UserID,
+		RoomID:        roomID,
+		Muted:         newSession.Muted,
+		VideoEnabled:  newSession.VideoEnabled,
+		ScreenSharing: newSession.ScreenSharing,
 	}
 
 	payloadData, _ := json.Marshal(payload)
@@ -518,12 +541,14 @@ func (s *Server) broadcastMediaState(roomID string, sess *session.Session) {
 	sessions := s.sessionManager.GetRoomSessions(roomID)
 
 	payload := protocol.MediaStatePayload{
-		SSRC:         sess.SSRC,
-		VideoSSRC:    sess.VideoSSRC,
-		UserID:       sess.UserID,
-		RoomID:       roomID,
-		Muted:        sess.Muted,
-		VideoEnabled: sess.VideoEnabled,
+		SSRC:          sess.SSRC,
+		VideoSSRC:     sess.VideoSSRC,
+		ScreenSSRC:    sess.ScreenSSRC,
+		UserID:        sess.UserID,
+		RoomID:        roomID,
+		Muted:         sess.Muted,
+		VideoEnabled:  sess.VideoEnabled,
+		ScreenSharing: sess.ScreenSharing,
 	}
 
 	payloadData, _ := json.Marshal(payload)

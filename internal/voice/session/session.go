@@ -9,26 +9,31 @@ import (
 )
 
 type Session struct {
-	ID        uint32
-	UserID    string
-	RoomID    string
-	SSRC      uint32
-	VideoSSRC uint32
+	ID         uint32
+	UserID     string
+	RoomID     string
+	SSRC       uint32 // Audio
+	VideoSSRC  uint32 // Camera
+	ScreenSSRC uint32 // Screen Share
 
 	addr         *net.UDPAddr
 	lastActivity time.Time
 
-	Crypto       *crypto.SessionCrypto
-	Muted        bool
-	VideoEnabled bool
-	Speaking     bool
+	Crypto        *crypto.SessionCrypto
+	Muted         bool
+	VideoEnabled  bool
+	ScreenSharing bool
+	Speaking      bool
+
+	Subscriptions map[uint32]bool
 
 	mu sync.RWMutex
 
-	AudioSeq uint16
-	VideoSeq uint16
-	AudioTS  uint32
-	VideoTS  uint32
+	AudioSeq  uint16
+	VideoSeq  uint16
+	ScreenSeq uint16
+	AudioTS   uint32
+	VideoTS   uint32
 
 	retransmitBuf *RetransmitBuffer
 }
@@ -59,6 +64,12 @@ func (s *Session) SetVideoEnabled(enabled bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.VideoEnabled = enabled
+}
+
+func (s *Session) SetScreenSharing(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ScreenSharing = enabled
 }
 
 func (s *Session) SetSpeaking(speaking bool) {
@@ -192,11 +203,12 @@ func (m *Manager) CreateSession(
 	audioSSRC := m.nextSSRC
 	m.nextSSRC++
 
-	var videoSSRC uint32
-	if videoEnabled {
-		videoSSRC = m.nextSSRC
-		m.nextSSRC++
-	}
+	// Always allocate video/screen SSRCs to allow toggling mid-call without re-handshake
+	videoSSRC := m.nextSSRC
+	m.nextSSRC++
+
+	screenSSRC := m.nextSSRC
+	m.nextSSRC++
 
 	sess := &Session{
 		ID:            sessionID,
@@ -204,11 +216,13 @@ func (m *Manager) CreateSession(
 		RoomID:        roomID,
 		SSRC:          audioSSRC,
 		VideoSSRC:     videoSSRC,
+		ScreenSSRC:    screenSSRC,
 		addr:          addr,
 		lastActivity:  now,
 		Crypto:        sessionCrypto,
 		Muted:         false,
 		VideoEnabled:  videoEnabled,
+		ScreenSharing: false,
 		Speaking:      false,
 		retransmitBuf: NewRetransmitBuffer(500 * time.Millisecond),
 	}
@@ -224,6 +238,10 @@ func (m *Manager) CreateSession(
 	m.ssrcMap[audioSSRC] = sess
 	if videoSSRC != 0 {
 		m.ssrcMap[videoSSRC] = sess
+	}
+
+	if screenSSRC != 0 {
+		m.ssrcMap[screenSSRC] = sess
 	}
 
 	if addr != nil {
@@ -328,6 +346,9 @@ func (m *Manager) RemoveSession(sessionID uint32) {
 	if sess.VideoSSRC != 0 {
 		delete(m.ssrcMap, sess.VideoSSRC)
 	}
+	if sess.ScreenSSRC != 0 {
+		delete(m.ssrcMap, sess.ScreenSSRC)
+	}
 
 	if a := sess.GetAddr(); a != nil {
 		delete(m.addrMap, a.String())
@@ -364,6 +385,9 @@ func (m *Manager) CleanupInactive(timeout time.Duration) []uint32 {
 		if sess.VideoSSRC != 0 {
 			delete(m.ssrcMap, sess.VideoSSRC)
 		}
+		if sess.ScreenSSRC != 0 {
+			delete(m.ssrcMap, sess.ScreenSSRC)
+		}
 
 		if a := sess.GetAddr(); a != nil {
 			delete(m.addrMap, a.String())
@@ -393,4 +417,30 @@ func (m *Manager) GetActiveSessions(activeWithin time.Duration) []*Session {
 		}
 	}
 	return out
+}
+
+func (s *Session) UpdateSubscriptions(subs []uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(subs) == 0 {
+		s.Subscriptions = nil // Subscribe to all
+		return
+	}
+
+	s.Subscriptions = make(map[uint32]bool)
+	for _, ssrc := range subs {
+		s.Subscriptions[ssrc] = true
+	}
+}
+
+func (s *Session) IsSubscribedTo(ssrc uint32) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.Subscriptions == nil {
+		return true
+	}
+
+	return s.Subscriptions[ssrc]
 }

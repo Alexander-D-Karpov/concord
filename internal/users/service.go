@@ -74,7 +74,7 @@ func (s *Service) UpdateProfile(ctx context.Context, displayName, avatarURL, bio
 		user.AvatarURL = avatarURL
 	}
 	if bio != "" {
-		user.Bio = &bio
+		user.Bio = bio
 	}
 
 	if err := s.repo.Update(ctx, user); err != nil {
@@ -85,8 +85,8 @@ func (s *Service) UpdateProfile(ctx context.Context, displayName, avatarURL, bio
 		friends, err := s.getFriendsList(ctx, id)
 		if err == nil {
 			bioStr := ""
-			if user.Bio != nil {
-				bioStr = *user.Bio
+			if user.Bio != "" {
+				bio = user.Bio
 			}
 
 			profileEvent := &streamv1.ServerEvent{
@@ -166,7 +166,7 @@ func (s *Service) getFriendsList(ctx context.Context, userID uuid.UUID) ([]uuid.
 		WHERE user_id1 = $1 OR user_id2 = $1
 	`
 
-	rows, err := s.repo.Pool().Query(ctx, query, userID)
+	rows, err := s.repo.pool.Query(ctx, query, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -196,16 +196,7 @@ func (s *Service) SearchUsers(ctx context.Context, query string, limit int, curs
 		}
 	}
 
-	userID := interceptor.GetUserID(ctx)
-	var excludeUserID *uuid.UUID
-	if userID != "" {
-		id, err := uuid.Parse(userID)
-		if err == nil {
-			excludeUserID = &id
-		}
-	}
-
-	users, err := s.repo.Search(ctx, query, excludeUserID, limit+1, offset)
+	users, err := s.repo.Search(ctx, query, limit)
 	if err != nil {
 		return nil, nil, err
 	}

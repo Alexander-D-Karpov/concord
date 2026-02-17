@@ -83,6 +83,7 @@ func (r *Registrar) StartHeartbeat(ctx context.Context, interval time.Duration, 
 	r.heartbeatTicker = time.NewTicker(interval)
 
 	go func() {
+		consecutiveFailures := 0
 		for {
 			select {
 			case <-r.heartbeatTicker.C:
@@ -99,12 +100,21 @@ func (r *Registrar) StartHeartbeat(ctx context.Context, interval time.Duration, 
 
 				_, err := r.client.Heartbeat(ctx, req)
 				if err != nil {
-					r.logger.Warn("heartbeat failed", zap.Error(err))
-				}
+					consecutiveFailures++
+					r.logger.Warn("heartbeat failed", zap.Error(err), zap.Int("failures", consecutiveFailures))
 
+					if consecutiveFailures >= 3 {
+						r.logger.Info("re-registering after heartbeat failures")
+						if regErr := r.Register(ctx); regErr != nil {
+							r.logger.Error("re-registration failed", zap.Error(regErr))
+						} else {
+							consecutiveFailures = 0
+						}
+					}
+				} else {
+					consecutiveFailures = 0
+				}
 			case <-r.stopChan:
-				return
-			case <-ctx.Done():
 				return
 			}
 		}

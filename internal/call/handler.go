@@ -92,10 +92,11 @@ func (h *Handler) JoinVoice(ctx context.Context, req *callv1.JoinVoiceRequest) (
 	for _, p := range participants {
 		if p.UserID != userID {
 			protoParticipants = append(protoParticipants, &callv1.Participant{
-				UserId:       p.UserID,
-				Ssrc:         0,
-				Muted:        p.Muted,
-				VideoEnabled: p.VideoEnabled,
+				UserId:        p.UserID,
+				Ssrc:          0,
+				Muted:         p.Muted,
+				VideoEnabled:  p.VideoEnabled,
+				ScreenSharing: p.ScreenSharing,
 			})
 		}
 	}
@@ -141,16 +142,18 @@ func (h *Handler) LeaveVoice(ctx context.Context, req *callv1.LeaveVoiceRequest)
 	)
 
 	if h.hub != nil {
-		h.hub.BroadcastToRoom(req.RoomId, &streamv1.ServerEvent{
-			EventId:   uuid.New().String(),
-			CreatedAt: timestamppb.Now(),
-			Payload: &streamv1.ServerEvent_VoiceUserLeft{
-				VoiceUserLeft: &streamv1.VoiceUserLeft{
-					RoomId: req.RoomId,
-					UserId: userID,
+		if h.hub.RoomHasSubscribers(req.RoomId) {
+			h.hub.BroadcastToRoom(req.RoomId, &streamv1.ServerEvent{
+				EventId:   uuid.New().String(),
+				CreatedAt: timestamppb.Now(),
+				Payload: &streamv1.ServerEvent_VoiceUserLeft{
+					VoiceUserLeft: &streamv1.VoiceUserLeft{
+						RoomId: req.RoomId,
+						UserId: userID,
+					},
 				},
-			},
-		})
+			})
+		}
 	}
 
 	return &callv1.EmptyResponse{}, nil
@@ -162,7 +165,7 @@ func (h *Handler) SetMediaPrefs(ctx context.Context, req *callv1.SetMediaPrefsRe
 		return nil, errors.ToGRPCError(errors.Unauthorized("user not authenticated"))
 	}
 
-	if err := h.voiceAssign.UpdateMediaPrefs(ctx, req.RoomId, userID, req.Muted, req.VideoEnabled); err != nil {
+	if err := h.voiceAssign.UpdateMediaPrefs(ctx, req.RoomId, userID, req.Muted, req.VideoEnabled, req.ScreenSharing); err != nil {
 		h.logger.Warn("failed to update media prefs",
 			zap.String("room_id", req.RoomId),
 			zap.String("user_id", userID),
@@ -203,11 +206,12 @@ func (h *Handler) GetVoiceStatus(ctx context.Context, req *callv1.GetVoiceStatus
 	protoParticipants := make([]*callv1.VoiceParticipant, len(participants))
 	for i, p := range participants {
 		protoParticipants[i] = &callv1.VoiceParticipant{
-			UserId:       p.UserID,
-			Muted:        p.Muted,
-			VideoEnabled: p.VideoEnabled,
-			Speaking:     p.Speaking,
-			JoinedAt:     timestamppb.New(time.Unix(p.JoinedAt, 0)),
+			UserId:        p.UserID,
+			Muted:         p.Muted,
+			VideoEnabled:  p.VideoEnabled,
+			ScreenSharing: p.ScreenSharing,
+			Speaking:      p.Speaking,
+			JoinedAt:      timestamppb.New(time.Unix(p.JoinedAt, 0)),
 		}
 	}
 

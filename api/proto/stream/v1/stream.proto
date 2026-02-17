@@ -8,6 +8,8 @@ import "google/protobuf/timestamp.proto";
 import "common/v1/types.proto";
 import "friends/v1/friends.proto";
 import "membership/v1/membership.proto";
+import "dm/v1/dm.proto";
+import "protoc-gen-openapiv2/options/annotations.proto";
 
 message Ack {
   string event_id = 1;
@@ -153,6 +155,62 @@ message RoomInviteUpdated {
   membership.v1.RoomInvite invite = 1;
 }
 
+message DMMessageCreated {
+  string channel_id = 1;
+  concord.dm.v1.DMMessage message = 2;
+}
+
+message DMMessageEdited {
+  string channel_id = 1;
+  concord.dm.v1.DMMessage message = 2;
+}
+
+message DMMessageDeleted {
+  string channel_id = 1;
+  string message_id = 2;
+}
+
+message TypingStarted {
+  string room_id = 1;
+  string channel_id = 2;
+  string user_id = 3;
+  string user_display_name = 4;
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+message TypingStopped {
+  string room_id = 1;
+  string channel_id = 2;
+  string user_id = 3;
+}
+
+message MessageRead {
+  string room_id = 1;
+  string channel_id = 2;
+  string user_id = 3;
+  string message_id = 4;
+  google.protobuf.Timestamp read_at = 5;
+}
+
+message UnreadCountUpdated {
+  string room_id = 1;
+  string channel_id = 2;
+  int32 unread_count = 3;
+  string last_message_id = 4;
+}
+
+// Added DM Call events
+message DMCallStarted {
+  string channel_id = 1;
+  string caller_id = 2;
+  bool audio_only = 3;
+}
+
+message DMCallEnded {
+  string channel_id = 1;
+  string user_id = 2;
+}
+
 message ServerEvent {
   string event_id = 1;
   google.protobuf.Timestamp created_at = 2;
@@ -167,6 +225,9 @@ message ServerEvent {
     MemberJoined member_joined = 20;
     MemberRemoved member_removed = 21;
     MemberNicknameChanged member_nickname_changed = 22;
+    DMMessageCreated dm_message_created = 25;
+    DMMessageEdited dm_message_edited = 26;
+    DMMessageDeleted dm_message_deleted = 27;
     VoiceStateChanged voice_state_changed = 30;
     RoomUpdated room_updated = 40;
     RoleChanged role_changed = 41;
@@ -183,6 +244,13 @@ message ServerEvent {
     UserUnblocked user_unblocked = 74;
     RoomInviteCreated room_invite_created = 80;
     RoomInviteUpdated room_invite_updated = 81;
+    TypingStarted typing_started = 90;
+    TypingStopped typing_stopped = 91;
+    MessageRead message_read = 92;
+    UnreadCountUpdated unread_count_updated = 93;
+    
+    DMCallStarted dm_call_started = 94;
+    DMCallEnded dm_call_ended = 95;
   }
 }
 

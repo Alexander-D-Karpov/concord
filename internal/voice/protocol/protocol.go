@@ -26,6 +26,7 @@ const (
 	PacketTypePli             = 0x0b
 	PacketTypeRR              = 0x0c
 	PacketTypeParticipantLeft = 0x0d
+	PacketTypeSubscribe       = 0x0e
 
 	FlagMarker   = 0x01
 	FlagKeyframe = 0x02
@@ -223,15 +224,18 @@ type WelcomePayload struct {
 	SessionID    uint32            `json:"session_id"`
 	SSRC         uint32            `json:"ssrc"`
 	VideoSSRC    uint32            `json:"video_ssrc,omitempty"`
+	ScreenSSRC   uint32            `json:"screen_ssrc,omitempty"`
 	Participants []ParticipantInfo `json:"participants"`
 }
 
 type ParticipantInfo struct {
-	UserID       string `json:"user_id"`
-	SSRC         uint32 `json:"ssrc"`
-	VideoSSRC    uint32 `json:"video_ssrc,omitempty"`
-	Muted        bool   `json:"muted"`
-	VideoEnabled bool   `json:"video_enabled"`
+	UserID        string `json:"user_id"`
+	SSRC          uint32 `json:"ssrc"`
+	VideoSSRC     uint32 `json:"video_ssrc,omitempty"`
+	ScreenSSRC    uint32 `json:"screen_ssrc,omitempty"`
+	Muted         bool   `json:"muted"`
+	VideoEnabled  bool   `json:"video_enabled"`
+	ScreenSharing bool   `json:"screen_sharing"`
 }
 
 type SpeakingPayload struct {
@@ -243,12 +247,14 @@ type SpeakingPayload struct {
 }
 
 type MediaStatePayload struct {
-	SSRC         uint32 `json:"ssrc"`
-	VideoSSRC    uint32 `json:"video_ssrc,omitempty"`
-	UserID       string `json:"user_id"`
-	RoomID       string `json:"room_id"`
-	Muted        bool   `json:"muted"`
-	VideoEnabled bool   `json:"video_enabled"`
+	SSRC          uint32 `json:"ssrc"`
+	VideoSSRC     uint32 `json:"video_ssrc,omitempty"`
+	ScreenSSRC    uint32 `json:"screen_ssrc,omitempty"`
+	UserID        string `json:"user_id"`
+	RoomID        string `json:"room_id"`
+	Muted         bool   `json:"muted"`
+	VideoEnabled  bool   `json:"video_enabled"`
+	ScreenSharing bool   `json:"screen_sharing"`
 }
 
 type NackPayload struct {
@@ -276,6 +282,10 @@ type ParticipantLeftPayload struct {
 	RoomID    string `json:"room_id"`
 	SSRC      uint32 `json:"ssrc"`
 	VideoSSRC uint32 `json:"video_ssrc,omitempty"`
+}
+
+type SubscribePayload struct {
+	Subscriptions []uint32 `json:"subscriptions"` // List of SSRCs to subscribe to
 }
 
 func ParseNack(data []byte) (*NackPayload, error) {

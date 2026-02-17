@@ -5,6 +5,7 @@ package concord.chat.v1;
 option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/chat/v1;chatv1";
 
 import "google/api/annotations.proto";
+import "google/protobuf/timestamp.proto";
 import "common/v1/types.proto";
 
 message SendMessageRequest {
@@ -12,15 +13,6 @@ message SendMessageRequest {
   string content = 2;
   string reply_to_id = 3;
   repeated string mention_user_ids = 4;
-  repeated MessageAttachmentUpload attachments = 5;
-}
-
-message MessageAttachmentUpload {
-  string filename = 1;
-  string content_type = 2;
-  bytes data = 3;
-  int32 width = 4;
-  int32 height = 5;
 }
 
 message SendMessageResponse {
@@ -28,44 +20,56 @@ message SendMessageResponse {
 }
 
 message EditMessageRequest {
-  string message_id = 1;
-  string content = 2;
+  string room_id = 1;
+  string message_id = 2;
+  string content = 3;
+}
+
+message EditMessageResponse {
+  concord.common.v1.Message message = 1;
 }
 
 message DeleteMessageRequest {
-  string message_id = 1;
+  string room_id = 1;
+  string message_id = 2;
 }
 
 message ListMessagesRequest {
   string room_id = 1;
-  string before_id = 2;
-  string after_id = 3;
+  string before = 2;
+  string after = 3;
   int32 limit = 4;
 }
 
 message ListMessagesResponse {
   repeated concord.common.v1.Message messages = 1;
   bool has_more = 2;
+  string last_read_message_id = 3;
 }
 
-message SearchMessagesRequest {
-  string query = 1;
-  string room_id = 2;
-  int32 limit = 3;
+message GetMessageRequest {
+  string room_id = 1;
+  string message_id = 2;
 }
 
-message SearchMessagesResponse {
-  repeated concord.common.v1.Message messages = 1;
+message GetMessageResponse {
+  concord.common.v1.Message message = 1;
 }
 
 message AddReactionRequest {
-  string message_id = 1;
-  string emoji = 2;
+  string room_id = 1;
+  string message_id = 2;
+  string emoji = 3;
+}
+
+message AddReactionResponse {
+  concord.common.v1.MessageReaction reaction = 1;
 }
 
 message RemoveReactionRequest {
-  string message_id = 1;
-  string emoji = 2;
+  string room_id = 1;
+  string message_id = 2;
+  string emoji = 3;
 }
 
 message PinMessageRequest {
@@ -87,15 +91,61 @@ message ListPinnedMessagesResponse {
 }
 
 message GetThreadRequest {
-  string message_id = 1;
-  int32 limit = 2;
-  string cursor = 3;
+  string room_id = 1;
+  string message_id = 2;
+  string before = 3;
+  int32 limit = 4;
 }
 
 message GetThreadResponse {
-  repeated concord.common.v1.Message messages = 1;
-  string next_cursor = 2;
+  concord.common.v1.Message parent = 1;
+  repeated concord.common.v1.Message replies = 2;
   bool has_more = 3;
+}
+
+message SearchMessagesRequest {
+  string room_id = 1;
+  string query = 2;
+  string before = 3;
+  int32 limit = 4;
+}
+
+message SearchMessagesResponse {
+  repeated concord.common.v1.Message messages = 1;
+  bool has_more = 2;
+}
+
+message MarkAsReadRequest {
+  string room_id = 1;
+  string message_id = 2;
+}
+
+message MarkAsReadResponse {
+  string last_read_message_id = 1;
+  int32 unread_count = 2;
+}
+
+message GetUnreadCountsRequest {}
+
+message RoomUnreadInfo {
+  string room_id = 1;
+  int32 unread_count = 2;
+  string last_read_message_id = 3;
+  string latest_message_id = 4;
+  google.protobuf.Timestamp latest_message_at = 5;
+}
+
+message GetUnreadCountsResponse {
+  repeated RoomUnreadInfo rooms = 1;
+  int32 total_unread = 2;
+}
+
+message StartTypingRequest {
+  string room_id = 1;
+}
+
+message StopTypingRequest {
+  string room_id = 1;
 }
 
 message EmptyResponse {}
@@ -107,56 +157,97 @@ service ChatService {
       body: "*"
     };
   }
-  rpc EditMessage(EditMessageRequest) returns (concord.common.v1.Message) {
+
+  rpc EditMessage(EditMessageRequest) returns (EditMessageResponse) {
     option (google.api.http) = {
-      patch: "/v1/messages/{message_id}"
+      patch: "/v1/rooms/{room_id}/messages/{message_id}"
       body: "*"
     };
   }
+
   rpc DeleteMessage(DeleteMessageRequest) returns (EmptyResponse) {
     option (google.api.http) = {
-      delete: "/v1/messages/{message_id}"
+      delete: "/v1/rooms/{room_id}/messages/{message_id}"
     };
   }
+
   rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse) {
     option (google.api.http) = {
       get: "/v1/rooms/{room_id}/messages"
     };
   }
-  rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse) {
+
+  rpc GetMessage(GetMessageRequest) returns (GetMessageResponse) {
     option (google.api.http) = {
-      get: "/v1/rooms/{room_id}/messages/search"
+      get: "/v1/rooms/{room_id}/messages/{message_id}"
     };
   }
-  rpc AddReaction(AddReactionRequest) returns (EmptyResponse) {
+
+  rpc AddReaction(AddReactionRequest) returns (AddReactionResponse) {
     option (google.api.http) = {
-      post: "/v1/messages/{message_id}/reactions"
+      post: "/v1/rooms/{room_id}/messages/{message_id}/reactions"
       body: "*"
     };
   }
+
   rpc RemoveReaction(RemoveReactionRequest) returns (EmptyResponse) {
     option (google.api.http) = {
-      delete: "/v1/messages/{message_id}/reactions/{emoji}"
+      delete: "/v1/rooms/{room_id}/messages/{message_id}/reactions/{emoji}"
     };
   }
+
   rpc PinMessage(PinMessageRequest) returns (EmptyResponse) {
     option (google.api.http) = {
       post: "/v1/rooms/{room_id}/messages/{message_id}/pin"
     };
   }
+
   rpc UnpinMessage(UnpinMessageRequest) returns (EmptyResponse) {
     option (google.api.http) = {
       delete: "/v1/rooms/{room_id}/messages/{message_id}/pin"
     };
   }
+
   rpc ListPinnedMessages(ListPinnedMessagesRequest) returns (ListPinnedMessagesResponse) {
     option (google.api.http) = {
-      get: "/v1/rooms/{room_id}/pins"
+      get: "/v1/rooms/{room_id}/pinned"
     };
   }
+
   rpc GetThread(GetThreadRequest) returns (GetThreadResponse) {
     option (google.api.http) = {
-      get: "/v1/messages/{message_id}/thread"
+      get: "/v1/rooms/{room_id}/messages/{message_id}/thread"
+    };
+  }
+
+  rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse) {
+    option (google.api.http) = {
+      get: "/v1/rooms/{room_id}/messages/search"
+    };
+  }
+
+  rpc MarkAsRead(MarkAsReadRequest) returns (MarkAsReadResponse) {
+    option (google.api.http) = {
+      post: "/v1/rooms/{room_id}/read"
+      body: "*"
+    };
+  }
+
+  rpc GetUnreadCounts(GetUnreadCountsRequest) returns (GetUnreadCountsResponse) {
+    option (google.api.http) = {
+      get: "/v1/unread"
+    };
+  }
+
+  rpc StartTyping(StartTypingRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/rooms/{room_id}/typing"
+    };
+  }
+
+  rpc StopTyping(StopTypingRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      delete: "/v1/rooms/{room_id}/typing"
     };
   }
 }

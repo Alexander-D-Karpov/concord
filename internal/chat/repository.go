@@ -148,20 +148,25 @@ func (r *Repository) GetByID(ctx context.Context, id int64) (*Message, error) {
 		return nil, err
 	}
 
-	msg.Reactions, err = r.GetReactions(ctx, id)
-	if err != nil {
-		return nil, err
-	}
+	messageIDs := []int64{id}
 
-	msg.Attachments, err = r.GetAttachments(ctx, id)
+	reactionsMap, err := r.GetReactionsBatch(ctx, messageIDs)
 	if err != nil {
 		return nil, err
 	}
+	msg.Reactions = reactionsMap[id]
 
-	msg.Mentions, err = r.GetMentions(ctx, id)
+	attachmentsMap, err := r.GetAttachmentsBatch(ctx, messageIDs)
 	if err != nil {
 		return nil, err
 	}
+	msg.Attachments = attachmentsMap[id]
+
+	mentionsMap, err := r.GetMentionsBatch(ctx, messageIDs)
+	if err != nil {
+		return nil, err
+	}
+	msg.Mentions = mentionsMap[id]
 
 	return msg, nil
 }
@@ -252,6 +257,7 @@ func (r *Repository) ListByRoom(ctx context.Context, roomID uuid.UUID, beforeID,
 	defer rows.Close()
 
 	var messages []*Message
+	var messageIDs []int64
 	for rows.Next() {
 		msg := &Message{}
 		if err := rows.Scan(
@@ -268,18 +274,35 @@ func (r *Repository) ListByRoom(ctx context.Context, roomID uuid.UUID, beforeID,
 		); err != nil {
 			return nil, err
 		}
-
-		msg.Reactions, err = r.GetReactions(ctx, msg.ID)
-		if err != nil {
-			return nil, err
-		}
-
-		msg.Attachments, err = r.GetAttachments(ctx, msg.ID)
-		if err != nil {
-			return nil, err
-		}
-
 		messages = append(messages, msg)
+		messageIDs = append(messageIDs, msg.ID)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(messageIDs) > 0 {
+		reactionsMap, err := r.GetReactionsBatch(ctx, messageIDs)
+		if err != nil {
+			return nil, err
+		}
+
+		attachmentsMap, err := r.GetAttachmentsBatch(ctx, messageIDs)
+		if err != nil {
+			return nil, err
+		}
+
+		mentionsMap, err := r.GetMentionsBatch(ctx, messageIDs)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, msg := range messages {
+			msg.Reactions = reactionsMap[msg.ID]
+			msg.Attachments = attachmentsMap[msg.ID]
+			msg.Mentions = mentionsMap[msg.ID]
+		}
 	}
 
 	if beforeID == nil && afterID == nil {
@@ -288,7 +311,96 @@ func (r *Repository) ListByRoom(ctx context.Context, roomID uuid.UUID, beforeID,
 		}
 	}
 
-	return messages, rows.Err()
+	return messages, nil
+}
+
+func (r *Repository) GetReactionsBatch(ctx context.Context, messageIDs []int64) (map[int64][]Reaction, error) {
+	if len(messageIDs) == 0 {
+		return make(map[int64][]Reaction), nil
+	}
+
+	query := `
+		SELECT id, message_id, user_id, emoji, created_at
+		FROM message_reactions
+		WHERE message_id = ANY($1)
+		ORDER BY created_at ASC
+	`
+
+	rows, err := r.pool.Query(ctx, query, messageIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[int64][]Reaction)
+	for rows.Next() {
+		var reaction Reaction
+		if err := rows.Scan(&reaction.ID, &reaction.MessageID, &reaction.UserID, &reaction.Emoji, &reaction.CreatedAt); err != nil {
+			return nil, err
+		}
+		result[reaction.MessageID] = append(result[reaction.MessageID], reaction)
+	}
+
+	return result, rows.Err()
+}
+
+func (r *Repository) GetAttachmentsBatch(ctx context.Context, messageIDs []int64) (map[int64][]Attachment, error) {
+	if len(messageIDs) == 0 {
+		return make(map[int64][]Attachment), nil
+	}
+
+	query := `
+		SELECT id, message_id, url, filename, content_type, size, width, height, created_at
+		FROM message_attachments
+		WHERE message_id = ANY($1)
+		ORDER BY created_at ASC
+	`
+
+	rows, err := r.pool.Query(ctx, query, messageIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[int64][]Attachment)
+	for rows.Next() {
+		var att Attachment
+		if err := rows.Scan(
+			&att.ID, &att.MessageID, &att.URL, &att.Filename,
+			&att.ContentType, &att.Size, &att.Width, &att.Height, &att.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		result[att.MessageID] = append(result[att.MessageID], att)
+	}
+
+	return result, rows.Err()
+}
+
+func (r *Repository) GetMentionsBatch(ctx context.Context, messageIDs []int64) (map[int64][]uuid.UUID, error) {
+	if len(messageIDs) == 0 {
+		return make(map[int64][]uuid.UUID), nil
+	}
+
+	query := `SELECT message_id, user_id FROM message_mentions WHERE message_id = ANY($1)`
+
+	rows, err := r.pool.Query(ctx, query, messageIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[int64][]uuid.UUID)
+	for rows.Next() {
+		var msgID int64
+		var userID uuid.UUID
+		if err := rows.Scan(&msgID, &userID); err != nil {
+			return nil, err
+		}
+		result[msgID] = append(result[msgID], userID)
+	}
+
+	return result, rows.Err()
 }
 
 func (r *Repository) Update(ctx context.Context, msg *Message) error {
