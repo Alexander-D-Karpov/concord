@@ -39,7 +39,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-
+    healthcheck:
+      test: [ "CMD", "wget", "-q", "--spider", "http://localhost:8081/health/live" ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
     env_file:
       - ../.env
 
@@ -73,7 +78,7 @@ services:
     restart: always
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
 
     env_file:
       - ../.env
@@ -106,15 +111,12 @@ services:
     ports:
       # Voice control (TCP). Exposed only locally for debugging / internal checks.
       - "127.0.0.1:${VOICE_CONTROL_HOST_PORT:-19001}:9001"
-
       # Metrics (TCP). Local only.
       - "127.0.0.1:${VOICE_METRICS_HOST_PORT:-19101}:9101"
-
       # Health (TCP). Local only.
       - "127.0.0.1:${VOICE_HEALTH_HOST_PORT:-18082}:8082"
-
       # UDP media range - PUBLIC
-      - "${VOICE_UDP_PORT_START:-50000}-${VOICE_UDP_PORT_END:-52000}:50000-52000/udp"
+      - "${VOICE_UDP_PORT_START:-50000}-${VOICE_UDP_PORT_END:-50049}:50000-50049/udp"
 
 volumes:
   postgres_data:
