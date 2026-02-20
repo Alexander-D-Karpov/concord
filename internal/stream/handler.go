@@ -19,14 +19,14 @@ import (
 
 type Handler struct {
 	streamv1.UnimplementedStreamServiceServer
-	hub       *events.Hub
-	usersRepo *users.Repository
+	hub      *events.Hub
+	presence *users.PresenceManager
 }
 
-func NewHandler(hub *events.Hub, usersRepo *users.Repository) *Handler {
+func NewHandler(hub *events.Hub, presence *users.PresenceManager) *Handler {
 	return &Handler{
-		hub:       hub,
-		usersRepo: usersRepo,
+		hub:      hub,
+		presence: presence,
 	}
 }
 
@@ -44,7 +44,7 @@ func (h *Handler) EventStream(stream streamv1.StreamService_EventStreamServer) e
 		return errors.ToGRPCError(errors.BadRequest("invalid user id"))
 	}
 
-	if err := h.usersRepo.UpdateStatus(ctx, userUUID, "online"); err != nil {
+	if err := h.presence.Heartbeat(ctx, userUUID); err != nil {
 		logger.Warn("failed to set user online", zap.Error(err))
 	}
 
@@ -60,8 +60,7 @@ func (h *Handler) EventStream(stream streamv1.StreamService_EventStreamServer) e
 
 		dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-
-		if err := h.usersRepo.UpdateStatus(dbCtx, userUUID, "offline"); err != nil {
+		if err := h.presence.SetOffline(dbCtx, userUUID); err != nil {
 			logger.Warn("failed to set user offline",
 				zap.String("user_id", userID),
 				zap.Error(err),
@@ -72,7 +71,6 @@ func (h *Handler) EventStream(stream streamv1.StreamService_EventStreamServer) e
 	logger.Info("stream connection established", zap.String("user_id", userID))
 
 	errChan := make(chan error, 1)
-
 	go func() {
 		for {
 			clientEvent, err := stream.Recv()
@@ -90,13 +88,18 @@ func (h *Handler) EventStream(stream streamv1.StreamService_EventStreamServer) e
 					)
 					return
 				}
-
 				logger.Error("stream recv error",
 					zap.String("user_id", userID),
 					zap.Error(err),
 				)
 				errChan <- err
 				return
+			}
+
+			if _, ok := clientEvent.Payload.(*streamv1.ClientEvent_Ack); ok {
+				if err := h.presence.Heartbeat(ctx, userUUID); err != nil {
+					logger.Debug("heartbeat failed", zap.Error(err))
+				}
 			}
 
 			h.handleClientEvent(userID, clientEvent, logger)

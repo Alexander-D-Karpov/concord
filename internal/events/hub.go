@@ -144,14 +144,12 @@ func (h *Hub) autoSubscribeUserRooms(ctx context.Context, client *Client, userID
 				b, _ := json.Marshal(v)
 				_ = json.Unmarshal(b, &roomIDs)
 			}
-			h.logger.Info("loaded room IDs from cache", zap.String("user_id", userID.String()), zap.Int("count", len(roomIDs)))
 		} else {
 			h.logger.Warn("GetOrLoad rooms failed; falling back to DB", zap.Error(err))
 		}
 	}
 
 	if roomIDs == nil {
-		h.logger.Info("cache disabled or failed, querying DB directly", zap.String("user_id", userID.String()))
 		rows, err := h.pool.Query(ctx, `SELECT room_id FROM memberships WHERE user_id = $1`, userID)
 		if err != nil {
 			h.logger.Error("failed to query user rooms", zap.String("user_id", userID.String()), zap.Error(err))
@@ -161,16 +159,30 @@ func (h *Hub) autoSubscribeUserRooms(ctx context.Context, client *Client, userID
 		for rows.Next() {
 			var rid uuid.UUID
 			if err := rows.Scan(&rid); err != nil {
-				h.logger.Warn("failed to scan room_id", zap.Error(err))
 				continue
 			}
 			roomIDs = append(roomIDs, rid.String())
 		}
-		h.logger.Info("loaded room IDs from DB (fallback)", zap.String("user_id", userID.String()), zap.Int("count", len(roomIDs)))
+	}
+
+	// Also subscribe to DM channels
+	dmRows, err := h.pool.Query(ctx,
+		`SELECT id FROM dm_channels WHERE user1_id = $1 OR user2_id = $1`, userID)
+	if err != nil {
+		h.logger.Warn("failed to query DM channels", zap.String("user_id", userID.String()), zap.Error(err))
+	} else {
+		defer dmRows.Close()
+		for dmRows.Next() {
+			var cid uuid.UUID
+			if err := dmRows.Scan(&cid); err != nil {
+				continue
+			}
+			roomIDs = append(roomIDs, cid.String())
+		}
 	}
 
 	if len(roomIDs) == 0 {
-		h.logger.Info("no rooms found for user", zap.String("user_id", userID.String()))
+		h.logger.Info("no rooms/channels found for user", zap.String("user_id", userID.String()))
 		return
 	}
 
@@ -189,21 +201,12 @@ func (h *Hub) autoSubscribeUserRooms(ctx context.Context, client *Client, userID
 
 		if h.Subscribe(client.UserID, rid) {
 			successCount++
-			h.logger.Debug("auto-subscribed to room",
-				zap.String("user_id", client.UserID),
-				zap.String("room_id", rid),
-			)
-		} else {
-			h.logger.Warn("failed to auto-subscribe to room",
-				zap.String("user_id", client.UserID),
-				zap.String("room_id", rid),
-			)
 		}
 	}
 
 	h.logger.Info("auto-subscribe completed",
 		zap.String("user_id", client.UserID),
-		zap.Int("total_rooms", len(roomIDs)),
+		zap.Int("total", len(roomIDs)),
 		zap.Int("successful", successCount),
 	)
 }
@@ -213,7 +216,7 @@ func (h *Hub) BroadcastToRoom(roomID string, event *streamv1.ServerEvent) {
 	users, exists := h.rooms[roomID]
 	if !exists {
 		h.mu.RUnlock()
-		h.logger.Error("attempted to broadcast to room with no subscribers",
+		h.logger.Debug("no subscribers in room, skipping broadcast",
 			zap.String("room_id", roomID),
 			zap.String("event_id", event.GetEventId()),
 			zap.String("event_type", fmt.Sprintf("%T", event.Payload)),
@@ -228,7 +231,7 @@ func (h *Hub) BroadcastToRoom(roomID string, event *streamv1.ServerEvent) {
 	h.mu.RUnlock()
 
 	if len(userIDs) == 0 {
-		h.logger.Error("room has zero subscribers",
+		h.logger.Debug("room has zero subscribers, skipping broadcast",
 			zap.String("room_id", roomID),
 			zap.String("event_id", event.GetEventId()),
 			zap.String("event_type", fmt.Sprintf("%T", event.Payload)),

@@ -21,6 +21,16 @@ message User {
   google.protobuf.Timestamp created_at = 5;
   string status = 6;
   string bio = 7;
+  string avatar_thumbnail_url = 8;
+}
+
+message AvatarEntry {
+  string id = 1;
+  string user_id = 2;
+  string full_url = 3;
+  string thumbnail_url = 4;
+  string original_filename = 5;
+  google.protobuf.Timestamp created_at = 6;
 }
 
 message Room {
@@ -40,7 +50,8 @@ message Member {
   Role role = 3;
   google.protobuf.Timestamp joined_at = 4;
   string nickname = 5;
-  string status = 6; 
+  string status = 6;
+  int64 last_read_message_id = 7;
 }
 
 message VoiceServer {
@@ -78,7 +89,7 @@ message MessageAttachment {
   string content_type = 4;
   int64 size = 5;
   int32 width = 6;
-  int32 height = 7; 
+  int32 height = 7;
   google.protobuf.Timestamp created_at = 8;
 }
 

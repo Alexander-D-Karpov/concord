@@ -131,7 +131,6 @@ func (pm *PresenceManager) broadcastStatusChange(ctx context.Context, userID uui
 		return
 	}
 
-	friends, _ := pm.getFriendsList(ctx, userID)
 	event := &streamv1.ServerEvent{
 		EventId:   uuid.New().String(),
 		CreatedAt: timestamppb.Now(),
@@ -143,8 +142,21 @@ func (pm *PresenceManager) broadcastStatusChange(ctx context.Context, userID uui
 		},
 	}
 
+	friends, _ := pm.getFriendsList(ctx, userID)
 	for _, friendID := range friends {
 		pm.hub.BroadcastToUser(friendID.String(), event)
+	}
+
+	query := `SELECT room_id FROM memberships WHERE user_id = $1`
+	rows, err := pm.repo.pool.Query(ctx, query, userID)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var roomID uuid.UUID
+			if err := rows.Scan(&roomID); err == nil {
+				pm.hub.BroadcastToRoom(roomID.String(), event)
+			}
+		}
 	}
 }
 

@@ -37,12 +37,13 @@ type FriendRequestWithUser struct {
 }
 
 type Friend struct {
-	UserID       uuid.UUID
-	Handle       string
-	DisplayName  string
-	AvatarURL    string
-	Status       string
-	FriendsSince time.Time
+	UserID             uuid.UUID
+	Handle             string
+	DisplayName        string
+	AvatarURL          string
+	AvatarThumbnailURL string
+	Status             string
+	FriendsSince       time.Time
 }
 
 type Repository struct {
@@ -316,10 +317,11 @@ func (r *Repository) ListFriends(ctx context.Context, userID uuid.UUID) ([]*Frie
 	}
 
 	query := `
-		SELECT u.id, u.handle, u.display_name, COALESCE(u.avatar_url, ''), COALESCE(u.status, 'offline'), f.created_at
+		SELECT u.id, u.handle, u.display_name, COALESCE(u.avatar_url, ''),
+		       COALESCE(u.avatar_thumbnail_url, ''), COALESCE(u.status, 'offline'), f.created_at
 		FROM friendships f
 		JOIN users u ON (
-			CASE 
+			CASE
 				WHEN f.user_id1 = $1 THEN f.user_id2 = u.id
 				ELSE f.user_id1 = u.id
 			END
@@ -327,7 +329,6 @@ func (r *Repository) ListFriends(ctx context.Context, userID uuid.UUID) ([]*Frie
 		WHERE f.user_id1 = $1 OR f.user_id2 = $1
 		ORDER BY u.display_name
 	`
-
 	rows, err := r.pool.Query(ctx, query, userID)
 	if err != nil {
 		return nil, err
@@ -338,18 +339,14 @@ func (r *Repository) ListFriends(ctx context.Context, userID uuid.UUID) ([]*Frie
 	for rows.Next() {
 		f := &Friend{}
 		if err := rows.Scan(
-			&f.UserID,
-			&f.Handle,
-			&f.DisplayName,
-			&f.AvatarURL,
-			&f.Status,
-			&f.FriendsSince,
+			&f.UserID, &f.Handle, &f.DisplayName,
+			&f.AvatarURL, &f.AvatarThumbnailURL,
+			&f.Status, &f.FriendsSince,
 		); err != nil {
 			return nil, err
 		}
 		friends = append(friends, f)
 	}
-
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}

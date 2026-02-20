@@ -117,6 +117,10 @@ func run() error {
 	}
 	logger.Info("migrations applied successfully")
 
+	if _, err := database.Pool.Exec(ctx, `UPDATE users SET status = 'offline'`); err != nil {
+		logger.Warn("failed to reset user statuses", zap.Error(err))
+	}
+
 	var cacheClient *cache.Cache
 	if cfg.Redis.Enabled {
 		cacheClient, err = cache.New(
@@ -192,7 +196,7 @@ func run() error {
 	}
 	eventsHub := events.NewHub(logger, database.Pool, aside)
 
-	usersService := users.NewService(usersRepo, eventsHub)
+	usersService := users.NewService(usersRepo, eventsHub, cfg.Storage.Path, cfg.Storage.URL)
 	usersHandler := users.NewHandler(usersService)
 
 	roomsRepo := rooms.NewRepository(database.Pool)
@@ -215,7 +219,10 @@ func run() error {
 	membershipService := membership.NewService(roomsRepo, eventsHub, aside)
 	membershipHandler := membership.NewHandler(membershipService)
 
-	streamHandler := stream.NewHandler(eventsHub, usersRepo)
+	presenceManager := users.NewPresenceManager(usersRepo, eventsHub)
+	defer presenceManager.Stop()
+
+	streamHandler := stream.NewHandler(eventsHub, presenceManager)
 
 	voiceAssignService := voiceassign.NewService(database.Pool, jwtManager, cacheClient)
 	callHandler := call.NewHandler(voiceAssignService, roomsRepo, eventsHub, logger)
@@ -349,7 +356,12 @@ func run() error {
 	}
 
 	httpMux := http.NewServeMux()
-	httpMux.Handle("/files/", storageHandler)
+	httpMux.Handle("/files/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(r.URL.Path) > 7 && r.URL.Path[7:14] == "avatars" {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		}
+		storageHandler.ServeHTTP(w, r)
+	}))
 	if swaggerHandler != nil {
 		httpMux.Handle("/docs/", swaggerHandler)
 		httpMux.Handle("/docs", http.RedirectHandler("/docs/", http.StatusMovedPermanently))

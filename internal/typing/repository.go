@@ -32,7 +32,7 @@ func (r *Repository) SetTypingInRoom(ctx context.Context, userID, roomID uuid.UU
 	query := `
 		INSERT INTO typing_indicators (user_id, room_id, channel_id, started_at, expires_at)
 		VALUES ($1, $2, NULL, NOW(), $3)
-		ON CONFLICT (user_id, COALESCE(room_id, '00000000-0000-0000-0000-000000000000'::UUID), COALESCE(channel_id, '00000000-0000-0000-0000-000000000000'::UUID))
+		ON CONFLICT (user_id, room_id) WHERE room_id IS NOT NULL
 		DO UPDATE SET started_at = NOW(), expires_at = $3
 	`
 
@@ -46,7 +46,7 @@ func (r *Repository) SetTypingInDM(ctx context.Context, userID, channelID uuid.U
 	query := `
 		INSERT INTO typing_indicators (user_id, room_id, channel_id, started_at, expires_at)
 		VALUES ($1, NULL, $2, NOW(), $3)
-		ON CONFLICT (user_id, COALESCE(room_id, '00000000-0000-0000-0000-000000000000'::UUID), COALESCE(channel_id, '00000000-0000-0000-0000-000000000000'::UUID))
+		ON CONFLICT (user_id, channel_id) WHERE channel_id IS NOT NULL
 		DO UPDATE SET started_at = NOW(), expires_at = $3
 	`
 

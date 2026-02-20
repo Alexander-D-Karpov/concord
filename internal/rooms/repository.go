@@ -25,12 +25,13 @@ type Room struct {
 }
 
 type Member struct {
-	RoomID   uuid.UUID
-	UserID   uuid.UUID
-	Role     string
-	Nickname *string
-	Status   string
-	JoinedAt time.Time
+	RoomID            uuid.UUID
+	UserID            uuid.UUID
+	Role              string
+	Nickname          *string
+	Status            string
+	LastReadMessageID int64
+	JoinedAt          time.Time
 }
 
 type RoomInvite struct {
@@ -301,17 +302,12 @@ func (r *Repository) RemoveMember(ctx context.Context, roomID, userID uuid.UUID)
 }
 
 func (r *Repository) GetMember(ctx context.Context, roomID, userID uuid.UUID) (*Member, error) {
-	if r.cache != nil {
-		var cached Member
-		if err := r.cache.Get(ctx, r.memberCacheKey(roomID, userID), &cached); err == nil {
-			return &cached, nil
-		}
-	}
-
 	query := `
-		SELECT m.room_id, m.user_id, m.role, m.nickname, COALESCE(u.status, 'offline'), m.joined_at
+		SELECT m.room_id, m.user_id, m.role, m.nickname, COALESCE(u.status, 'offline'), m.joined_at,
+		       COALESCE(rs.last_read_message_id, 0)
 		FROM memberships m
 		JOIN users u ON m.user_id = u.id
+		LEFT JOIN room_read_status rs ON m.room_id = rs.room_id AND m.user_id = rs.user_id
 		WHERE m.room_id = $1 AND m.user_id = $2
 	`
 
@@ -323,6 +319,7 @@ func (r *Repository) GetMember(ctx context.Context, roomID, userID uuid.UUID) (*
 		&member.Nickname,
 		&member.Status,
 		&member.JoinedAt,
+		&member.LastReadMessageID,
 	)
 
 	if err == pgx.ErrNoRows {
@@ -330,10 +327,6 @@ func (r *Repository) GetMember(ctx context.Context, roomID, userID uuid.UUID) (*
 	}
 	if err != nil {
 		return nil, err
-	}
-
-	if r.cache != nil {
-		_ = r.cache.Set(ctx, r.memberCacheKey(roomID, userID), member, memberCacheTTL)
 	}
 
 	return member, nil
@@ -358,17 +351,12 @@ func (r *Repository) IsMember(ctx context.Context, roomID, userID uuid.UUID) (bo
 }
 
 func (r *Repository) ListMembers(ctx context.Context, roomID uuid.UUID) ([]*Member, error) {
-	if r.cache != nil {
-		var cached []*Member
-		if err := r.cache.Get(ctx, r.memberListCacheKey(roomID), &cached); err == nil {
-			return cached, nil
-		}
-	}
-
 	query := `
-		SELECT m.room_id, m.user_id, m.role, m.nickname, COALESCE(u.status, 'offline'), m.joined_at
+		SELECT m.room_id, m.user_id, m.role, m.nickname, COALESCE(u.status, 'offline'), m.joined_at,
+		       COALESCE(rs.last_read_message_id, 0)
 		FROM memberships m
 		JOIN users u ON m.user_id = u.id
+		LEFT JOIN room_read_status rs ON m.room_id = rs.room_id AND m.user_id = rs.user_id
 		WHERE m.room_id = $1
 		ORDER BY m.joined_at ASC
 	`
@@ -389,21 +377,14 @@ func (r *Repository) ListMembers(ctx context.Context, roomID uuid.UUID) ([]*Memb
 			&member.Nickname,
 			&member.Status,
 			&member.JoinedAt,
+			&member.LastReadMessageID,
 		); err != nil {
 			return nil, err
 		}
 		members = append(members, member)
 	}
 
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	if r.cache != nil && len(members) > 0 {
-		_ = r.cache.Set(ctx, r.memberListCacheKey(roomID), members, memberListCacheTTL)
-	}
-
-	return members, nil
+	return members, rows.Err()
 }
 
 func (r *Repository) UpdateMemberRole(ctx context.Context, roomID, userID uuid.UUID, role string) error {

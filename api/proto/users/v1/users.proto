@@ -47,6 +47,31 @@ message ListUsersByIDsResponse {
   repeated concord.common.v1.User users = 1;
 }
 
+message UploadAvatarRequest {
+  bytes image_data = 1;
+  string filename = 2;
+}
+
+message UploadAvatarResponse {
+  string avatar_url = 1;
+  string thumbnail_url = 2;
+  concord.common.v1.AvatarEntry avatar = 3;
+}
+
+message DeleteAvatarRequest {
+  string avatar_id = 1;
+}
+
+message DeleteAvatarResponse {}
+
+message GetAvatarHistoryRequest {
+  string user_id = 1;
+}
+
+message GetAvatarHistoryResponse {
+  repeated concord.common.v1.AvatarEntry avatars = 1;
+}
+
 service UsersService {
   rpc GetSelf(GetSelfRequest) returns (concord.common.v1.User) {
     option (google.api.http) = {
@@ -84,6 +109,22 @@ service UsersService {
     option (google.api.http) = {
       post: "/v1/users/batch"
       body: "*"
+    };
+  }
+  rpc UploadAvatar(UploadAvatarRequest) returns (UploadAvatarResponse) {
+    option (google.api.http) = {
+      post: "/v1/users/me/avatar"
+      body: "*"
+    };
+  }
+  rpc DeleteAvatar(DeleteAvatarRequest) returns (DeleteAvatarResponse) {
+    option (google.api.http) = {
+      delete: "/v1/users/me/avatar/{avatar_id}"
+    };
+  }
+  rpc GetAvatarHistory(GetAvatarHistoryRequest) returns (GetAvatarHistoryResponse) {
+    option (google.api.http) = {
+      get: "/v1/users/{user_id}/avatars"
     };
   }
 }

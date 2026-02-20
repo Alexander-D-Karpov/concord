@@ -200,12 +200,13 @@ func toProtoMember(m *rooms.Member) *commonv1.Member {
 	}
 
 	return &commonv1.Member{
-		RoomId:   m.RoomID.String(),
-		UserId:   m.UserID.String(),
-		Role:     stringToRole(m.Role),
-		Nickname: nickname,
-		Status:   m.Status,
-		JoinedAt: timestamppb.New(m.JoinedAt),
+		RoomId:            m.RoomID.String(),
+		UserId:            m.UserID.String(),
+		Role:              stringToRole(m.Role),
+		Nickname:          nickname,
+		Status:            m.Status,
+		JoinedAt:          timestamppb.New(m.JoinedAt),
+		LastReadMessageId: m.LastReadMessageID,
 	}
 }
 
