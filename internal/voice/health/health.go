@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Alexander-D-Karpov/concord/internal/version"
 	"go.uber.org/zap"
 )
 
@@ -30,12 +31,14 @@ type Response struct {
 	Timestamp time.Time `json:"timestamp"`
 	Checks    []Check   `json:"checks"`
 	Uptime    string    `json:"uptime"`
+	Version   string    `json:"version"`
 }
 
 type Server struct {
 	logger    *zap.Logger
 	startTime time.Time
 	checks    map[string]func(context.Context) error
+	version   string
 	mu        sync.RWMutex
 }
 
@@ -44,6 +47,7 @@ func NewServer(logger *zap.Logger) *Server {
 		logger:    logger,
 		startTime: time.Now(),
 		checks:    make(map[string]func(context.Context) error),
+		version:   version.Voice(),
 	}
 }
 
@@ -56,6 +60,11 @@ func (s *Server) RegisterCheck(name string, check func(context.Context) error) {
 func (s *Server) Start(ctx context.Context, port int, path string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(path, s.handleHealth)
+
+	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"voice":"%s"}`, version.Voice())
+	})
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
@@ -110,6 +119,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Timestamp: time.Now(),
 		Checks:    checks,
 		Uptime:    time.Since(s.startTime).String(),
+		Version:   s.version,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

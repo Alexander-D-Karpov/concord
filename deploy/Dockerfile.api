@@ -27,9 +27,7 @@ WORKDIR /app
 RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /bin/concord-api /app/concord-api
-COPY --from=builder /go/bin/buf /usr/local/bin/buf
-
-COPY api/proto /app/api/proto
+COPY --from=builder /app/api/gen/openapiv2/ /app/api/gen/openapiv2/
 
 EXPOSE 8080 9000 9100 8081
 CMD ["/app/concord-api"]

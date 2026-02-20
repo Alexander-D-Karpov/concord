@@ -2,13 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -16,6 +15,7 @@ import (
 	"github.com/Alexander-D-Karpov/concord/internal/security"
 	"github.com/Alexander-D-Karpov/concord/internal/swagger"
 	"github.com/Alexander-D-Karpov/concord/internal/typing"
+	"github.com/Alexander-D-Karpov/concord/internal/version"
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -62,8 +62,6 @@ import (
 	"github.com/Alexander-D-Karpov/concord/internal/voiceassign"
 )
 
-const version = "0.1.0"
-
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -94,7 +92,7 @@ func run() error {
 	}()
 
 	logger.Info("starting concord-api",
-		zap.String("version", version),
+		zap.String("version", version.API()),
 		zap.Int("grpc_port", cfg.Server.GRPCPort),
 	)
 
@@ -147,7 +145,7 @@ func run() error {
 	}
 
 	metrics := observability.NewMetrics(logger)
-	healthChecker := observability.NewHealthChecker(logger, version)
+	healthChecker := observability.NewHealthChecker(logger, version.API())
 
 	healthChecker.RegisterCheck("database", func(ctx context.Context) (observability.HealthStatus, string, error) {
 		if err := database.Health(ctx); err != nil {
@@ -369,6 +367,18 @@ func run() error {
 	}
 	httpMux.Handle("/", httpGateway)
 
+	httpMux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{
+			"api":       version.API(),
+			"codename":  version.APICodename(),
+			"api_major": version.APIMajor,
+			"api_minor": version.APIMinor,
+		}
+		data, _ := json.Marshal(resp)
+		_, _ = w.Write(data)
+	})
+
 	httpServer := &http.Server{
 		Addr:    ":8080",
 		Handler: httpMux,
@@ -456,21 +466,6 @@ func generateOpenAPISpec(logger *zap.Logger) error {
 		logger.Info("OpenAPI spec exists", zap.String("path", specPath))
 		return nil
 	}
-
-	if err := os.MkdirAll(filepath.Dir(specPath), 0755); err != nil {
-		return err
-	}
-
-	logger.Info("generating OpenAPI spec...")
-	cmd := exec.Command("buf", "generate", "--path", "api")
-	cmd.Dir = "."
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("buf generate failed: %w", err)
-	}
-
-	logger.Info("OpenAPI spec generated", zap.String("path", specPath))
-	return nil
+	logger.Warn("OpenAPI spec not found — run 'make proto' to generate", zap.String("path", specPath))
+	return fmt.Errorf("spec not found at %s", specPath)
 }

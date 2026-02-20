@@ -35,6 +35,9 @@ type sessionStore struct {
 	byRoom     map[string]map[string]*VoiceSession
 	byUser     map[string]*VoiceSession
 	roomCrypto map[string]CryptoSuite
+	roomPort   map[string]int
+	portCount  int
+	nextPort   int
 }
 
 type VoiceSession struct {
@@ -97,8 +100,27 @@ func NewService(pool *pgxpool.Pool, jwtManager *jwt.Manager, cacheClient *cache.
 			byRoom:     make(map[string]map[string]*VoiceSession),
 			byUser:     make(map[string]*VoiceSession),
 			roomCrypto: make(map[string]CryptoSuite),
+			roomPort:   make(map[string]int),
+			portCount:  50,
 		},
 	}
+}
+
+func (s *Service) SetPortCount(count int) {
+	s.sessions.mu.Lock()
+	defer s.sessions.mu.Unlock()
+	s.sessions.portCount = count
+}
+
+func (ss *sessionStore) assignPort(roomID string, basePort int) int {
+	if port, ok := ss.roomPort[roomID]; ok {
+		return port
+	}
+
+	port := basePort + (ss.nextPort % ss.portCount)
+	ss.nextPort++
+	ss.roomPort[roomID] = port
+	return port
 }
 
 func (s *Service) voiceServerCacheKey(region string) string {
@@ -338,6 +360,10 @@ func (s *Service) createAssignment(ctx context.Context, roomOrChannelID, userID 
 		return nil, err
 	}
 
+	s.sessions.mu.Lock()
+	assignedPort := s.sessions.assignPort(roomOrChannelID, server.Port)
+	s.sessions.mu.Unlock()
+
 	session := &VoiceSession{
 		UserID:        userID,
 		RoomID:        roomOrChannelID,
@@ -353,14 +379,11 @@ func (s *Service) createAssignment(ctx context.Context, roomOrChannelID, userID 
 		ServerID: server.ID.String(),
 		Endpoint: UDPEndpoint{
 			Host: server.Host,
-			Port: server.Port,
+			Port: assignedPort,
 		},
 		VoiceToken: voiceToken,
-		Codec: CodecHint{
-			Audio: "opus",
-			Video: "h264",
-		},
-		Crypto: cryptoSuite,
+		Codec:      CodecHint{Audio: "opus", Video: "h264"},
+		Crypto:     cryptoSuite,
 	}, nil
 }
 
@@ -501,6 +524,7 @@ func (ss *sessionStore) remove(roomID, userID string) {
 		if len(room) == 0 {
 			delete(ss.byRoom, roomID)
 			delete(ss.roomCrypto, roomID)
+			delete(ss.roomPort, roomID)
 		}
 	}
 	delete(ss.byUser, userID)

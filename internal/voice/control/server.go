@@ -6,6 +6,7 @@ import (
 	"net"
 
 	registryv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/registry/v1"
+	"github.com/Alexander-D-Karpov/concord/internal/version"
 	"github.com/Alexander-D-Karpov/concord/internal/voice/session"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -32,7 +33,7 @@ func NewServer(
 		logger:         logger,
 		serverID:       serverID,
 		region:         region,
-		name:           name,
+		name:           fmt.Sprintf("%s/v%s", name, version.Voice()),
 		capacity:       capacity,
 	}
 }

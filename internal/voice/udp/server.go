@@ -82,7 +82,8 @@ func NewServer(
 		workChan:       make(chan *packetJob, workChanSize),
 		packetPool: sync.Pool{
 			New: func() interface{} {
-				return make([]byte, maxPacketLen)
+				b := make([]byte, maxPacketLen)
+				return &b
 			},
 		},
 	}, nil
@@ -115,11 +116,12 @@ func (s *Server) readLoop() {
 	defer s.wg.Done()
 
 	for {
-		buf := s.packetPool.Get().([]byte)
+		bufPtr := s.packetPool.Get().(*[]byte)
+		buf := *bufPtr
 
 		n, addr, err := s.conn.ReadFromUDP(buf)
 		if err != nil {
-			s.packetPool.Put(buf)
+			s.packetPool.Put(bufPtr)
 			select {
 			case <-s.stopChan:
 				return
@@ -130,14 +132,14 @@ func (s *Server) readLoop() {
 		}
 
 		if n > maxPacketLen {
-			s.packetPool.Put(buf)
+			s.packetPool.Put(bufPtr)
 			s.logger.Warn("packet too large", zap.Int("size", n))
 			continue
 		}
 
 		packetData := make([]byte, n)
 		copy(packetData, buf[:n])
-		s.packetPool.Put(buf)
+		s.packetPool.Put(bufPtr)
 
 		select {
 		case s.workChan <- &packetJob{data: packetData, addr: addr}:

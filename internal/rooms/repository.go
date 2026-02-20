@@ -97,6 +97,10 @@ func (r *Repository) userRoomsCacheKey(userID uuid.UUID) string {
 	return fmt.Sprintf("user:rooms:%s", userID.String())
 }
 
+func (r *Repository) ListForUser(ctx context.Context, userID uuid.UUID) ([]*Room, error) {
+	return r.ListByUser(ctx, userID)
+}
+
 func (r *Repository) Create(ctx context.Context, room *Room) error {
 	query := `
 		INSERT INTO rooms (id, name, description, is_private, created_by, voice_server_id, region)

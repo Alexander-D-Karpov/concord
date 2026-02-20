@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Alexander-D-Karpov/concord/internal/version"
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 
@@ -27,8 +28,6 @@ import (
 	"github.com/Alexander-D-Karpov/concord/internal/voice/udp"
 	"github.com/google/uuid"
 )
-
-const version = "0.1.0"
 
 func main() {
 	if err := run(); err != nil {
@@ -71,7 +70,7 @@ func run() error {
 	}
 
 	logger.Info("starting concord-voice",
-		zap.String("version", version),
+		zap.String("version", version.Voice()),
 		zap.String("server_id", serverID),
 		zap.String("region", cfg.Voice.Region),
 	)
@@ -104,11 +103,20 @@ func run() error {
 		return nil
 	})
 
-	// Create UDP server
+	// Create UDP server pool
 	udpPort := cfg.Voice.UDPPortStart
-	udpServer, err := udp.NewServer(
+	portCount := cfg.Voice.UDPPortCount
+	if portCount <= 0 {
+		portCount = 50
+	}
+	if portCount > (cfg.Voice.UDPPortEnd - cfg.Voice.UDPPortStart) {
+		portCount = cfg.Voice.UDPPortEnd - cfg.Voice.UDPPortStart
+	}
+
+	udpPool, err := udp.NewServerPool(
 		cfg.Voice.UDPHost,
-		udpPort,
+		cfg.Voice.UDPPortStart,
+		portCount,
 		sessionManager,
 		voiceRouter,
 		jwtManager,
@@ -116,7 +124,7 @@ func run() error {
 		metrics,
 	)
 	if err != nil {
-		return fmt.Errorf("create UDP server: %w", err)
+		return fmt.Errorf("create UDP pool: %w", err)
 	}
 
 	// Create control server for registry communication
@@ -198,9 +206,9 @@ func run() error {
 
 	// Start UDP server
 	go func() {
-		logger.Info("starting UDP server", zap.Int("port", udpPort))
-		if err := udpServer.Start(ctx); err != nil {
-			errChan <- fmt.Errorf("UDP server: %w", err)
+		logger.Info("starting UDP pool", zap.Int("start_port", cfg.Voice.UDPPortStart), zap.Int("count", portCount))
+		if err := udpPool.Start(ctx); err != nil {
+			errChan <- fmt.Errorf("UDP pool: %w", err)
 		}
 	}()
 

@@ -15,6 +15,7 @@ import (
 	roomsv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/rooms/v1"
 	usersv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/users/v1"
 	"github.com/Alexander-D-Karpov/concord/internal/middleware"
+	"github.com/Alexander-D-Karpov/concord/internal/version"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -71,11 +72,20 @@ func (g *Gateway) Init(ctx context.Context) error {
 
 	g.handler = middleware.CompressionMiddleware(
 		corsMiddleware(
-			loggingMiddleware(mux, g.logger),
+			versionMiddleware(
+				loggingMiddleware(mux, g.logger),
+			),
 		),
 	)
 
 	return nil
+}
+
+func versionMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Concord-Version", version.API())
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {

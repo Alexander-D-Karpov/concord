@@ -3,6 +3,7 @@ package swagger
 import (
 	"embed"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"io/fs"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Alexander-D-Karpov/concord/internal/version"
 	"go.uber.org/zap"
 )
 
@@ -113,10 +115,10 @@ func (h *Handler) loadSpec() error {
 		{"Bearer": []string{}},
 	}
 
-	if info, ok := spec["info"].(map[string]interface{}); ok {
-		info["title"] = "Concord API"
-		info["description"] = "Voice chat and messaging platform API"
-		info["version"] = "1.0.0"
+	spec["info"] = map[string]interface{}{
+		"title":       "Concord API",
+		"description": fmt.Sprintf("Voice chat and messaging platform API\n\nCodename: %s", version.APICodename()),
+		"version":     version.API(),
 	}
 
 	h.spec, err = json.MarshalIndent(spec, "", "  ")
@@ -127,10 +129,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, h.basePath)
 	path = strings.TrimPrefix(path, "/")
 
-	switch {
-	case path == "" || path == "index.html":
+	switch path {
+	case "", "index.html":
 		h.serveUI(w, r)
-	case path == "spec.json" || path == "openapi.json":
+	case "spec.json", "openapi.json":
 		h.serveSpec(w, r)
 	default:
 		h.serveStatic(w, r, path)

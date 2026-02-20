@@ -146,7 +146,10 @@ func writeFile(path string, data []byte) error {
 	if err != nil {
 		return fmt.Errorf("create file %s: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	_, err = io.Copy(f, bytes.NewReader(data))
-	return err
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }

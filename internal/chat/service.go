@@ -73,13 +73,6 @@ func (s *Service) isMember(ctx context.Context, roomID, userID uuid.UUID) (bool,
 	return true, nil
 }
 
-func (s *Service) invalidateMembershipCache(ctx context.Context, roomID, userID uuid.UUID) {
-	if s.cache != nil {
-		key := fmt.Sprintf("m:%s:%s", roomID.String(), userID.String())
-		_ = s.cache.Invalidate(ctx, key)
-	}
-}
-
 func (s *Service) SendMessage(ctx context.Context, roomID, content string, replyToID *int64, mentionIDs []uuid.UUID) (*Message, error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {

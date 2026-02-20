@@ -7,6 +7,7 @@ import (
 
 	commonv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/common/v1"
 	registryv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/registry/v1"
+	"github.com/Alexander-D-Karpov/concord/internal/version"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -56,7 +57,7 @@ func (r *Registrar) Register(ctx context.Context) error {
 	req := &registryv1.RegisterServerRequest{
 		Server: &commonv1.VoiceServer{
 			Id:           r.serverID,
-			Name:         r.name,
+			Name:         fmt.Sprintf("%s/v%s", r.name, version.Voice()),
 			Region:       r.region,
 			AddrUdp:      r.addrUDP,
 			AddrCtrl:     r.addrCtrl,
@@ -65,7 +66,6 @@ func (r *Registrar) Register(ctx context.Context) error {
 			UpdatedAt:    timestamppb.Now(),
 		},
 	}
-
 	resp, err := r.client.RegisterServer(ctx, req)
 	if err != nil {
 		return fmt.Errorf("failed to register: %w", err)

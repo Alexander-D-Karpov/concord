@@ -63,6 +63,7 @@ type VoiceConfig struct {
 	UDPHost      string
 	UDPPortStart int
 	UDPPortEnd   int
+	UDPPortCount int
 	ControlPort  int
 	ServerID     string
 	Region       string
@@ -142,6 +143,7 @@ func Load() (*Config, error) {
 			UDPHost:      getEnv("VOICE_UDP_HOST", "0.0.0.0"),
 			UDPPortStart: getEnvInt("VOICE_UDP_PORT_START", 50000),
 			UDPPortEnd:   getEnvInt("VOICE_UDP_PORT_END", 52000),
+			UDPPortCount: getEnvInt("VOICE_UDP_PORT_COUNT", 50),
 			ControlPort:  getEnvInt("VOICE_CONTROL_PORT", 9091),
 			ServerID:     getEnv("VOICE_SERVER_ID", ""),
 			Region:       getEnv("VOICE_REGION", "ru-west"),
