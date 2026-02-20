@@ -10,7 +10,8 @@ endif
 
 COMPOSE_FILE := deploy/docker-compose.yml
 ENV_FILE     := .env
-DC           := docker compose --env-file $(ENV_FILE) -f $(COMPOSE_FILE)
+PROJECT := concord
+DC := docker compose -p $(PROJECT) --env-file $(ENV_FILE) -f $(COMPOSE_FILE)
 
 proto:
 	@sh scripts/gen_proto.sh

@@ -104,16 +104,16 @@ services:
       VOICE_CAPACITY: ${VOICE_CAPACITY:-1000}
 
     ports:
-      # Voice CONTROL (TCP)
-      - "${HOST_VOICE_CONTROL_PORT:-9001}:9001"
+      # Voice control (TCP). Exposed only locally for debugging / internal checks.
+      - "127.0.0.1:${VOICE_CONTROL_HOST_PORT:-19001}:9001"
 
-      # Voice METRICS (TCP): Prometheus scrape for voice node
-      - "${HOST_VOICE_METRICS_PORT:-9101}:9101"
+      # Metrics (TCP). Local only.
+      - "127.0.0.1:${VOICE_METRICS_HOST_PORT:-19101}:9101"
 
-      # Voice HEALTH (TCP): health endpoint for voice node
-      - "${HOST_VOICE_HEALTH_PORT:-8082}:8082"
+      # Health (TCP). Local only.
+      - "127.0.0.1:${VOICE_HEALTH_HOST_PORT:-18082}:8082"
 
-      # Voice UDP MEDIA PORT RANGE:
+      # UDP media range - PUBLIC
       - "${VOICE_UDP_PORT_START:-50000}-${VOICE_UDP_PORT_END:-52000}:50000-52000/udp"
 
 volumes:
