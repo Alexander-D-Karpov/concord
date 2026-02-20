@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   postgres:
     image: postgres:14-alpine
@@ -14,7 +16,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   redis:
     image: redis:7-alpine
@@ -25,7 +27,7 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   api:
     build:
@@ -37,19 +39,32 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+
     env_file:
       - ../.env
+
     environment:
-      - DB_HOST=postgres
-      - REDIS_HOST=redis
-      - SERVER_PORT=${SERVER_PORT:-8080}
-      - GRPC_PORT=${GRPC_PORT:-9000}
-      - REGISTRY_URL=localhost:${GRPC_PORT:-9000}
+      # docker DNS hostnames
+      DB_HOST: postgres
+      REDIS_HOST: redis
+
+      # API writes uploads here
+      STORAGE_PATH: /media
+
+      # Intentionally NOT setting STORAGE_URL here.
+      # If absent in ../.env -> "null" (inactive).
+
+    volumes:
+      - /var/www/media/concord:/media
+
+    user: "${APP_UID:-33}:${APP_GID:-33}"
+
     ports:
-      - "${SERVER_PORT:-8080}:${SERVER_PORT:-8080}" # REST
-      - "${GRPC_PORT:-9000}:${GRPC_PORT:-9000}"     # gRPC
-      - "${METRICS_PORT:-9100}:${METRICS_PORT:-9100}" # Metrics
-      - "${HEALTH_PORT:-8081}:${HEALTH_PORT:-8081}"   # Health
+      # Bind to localhost only; nginx terminates TLS and proxies to these.
+      - "127.0.0.1:${HOST_HTTP_PORT:-18080}:8080"   # HTTP gateway (internal container port is 8080)
+      - "127.0.0.1:${HOST_GRPC_PORT:-19000}:9000"   # gRPC (internal container port is 9000)
+      - "127.0.0.1:${HOST_METRICS_PORT:-19100}:9100" # API Prometheus metrics
+      - "127.0.0.1:${HOST_HEALTH_PORT:-18081}:8081"  # API health checks
 
   voice:
     build:
@@ -59,21 +74,47 @@ services:
     depends_on:
       api:
         condition: service_started
+
     env_file:
       - ../.env
+
     environment:
-      - REGISTRY_URL=api:${GRPC_PORT:-9000}
-      - VOICE_CONTROL_PORT=${VOICE_CONTROL_PORT:-9001}
-      - VOICE_METRICS_PORT=${VOICE_METRICS_PORT:-9101}
-      - VOICE_HEALTH_PORT=${VOICE_HEALTH_PORT:-8082}
-      # Voice needs to know its public IP (host) for the client to connect via UDP
-      # In dev, this is 127.0.0.1. In prod, set VOICE_PUBLIC_HOST in .env
-      - VOICE_PUBLIC_HOST=${VOICE_PUBLIC_HOST:-127.0.0.1}
+      # Local voice talks to API over docker network (plaintext gRPC) TODO: add TLS support if needed
+      REGISTRY_URL: ${REGISTRY_URL_INTERNAL:-api:${GRPC_PORT:-9000}}
+
+      # --- Voice identity / placement ---
+      VOICE_SERVER_ID: ${VOICE_SERVER_ID:-}
+      VOICE_SERVER_NAME: ${VOICE_SERVER_NAME:-voice-local-1}
+      VOICE_REGION: ${VOICE_REGION:-ru-west-1}
+      VOICE_SECRET: ${VOICE_SECRET:-change-me}
+
+      # --- UDP media plane ---
+      VOICE_PUBLIC_HOST: ${VOICE_PUBLIC_HOST:-concord.akarpov.ru}
+      VOICE_UDP_HOST: ${VOICE_UDP_HOST:-0.0.0.0}
+      VOICE_UDP_PORT_START: ${VOICE_UDP_PORT_START:-50000}
+      VOICE_UDP_PORT_END: ${VOICE_UDP_PORT_END:-52000}
+
+      # --- Control/metrics/health plane ---
+      VOICE_CONTROL_PORT: ${VOICE_CONTROL_PORT:-9001}
+      VOICE_METRICS_PORT: ${VOICE_METRICS_PORT:-9101}
+      VOICE_HEALTH_PORT: ${VOICE_HEALTH_PORT:-8082}
+
+      # Heartbeat / capacity hints
+      VOICE_HEARTBEAT_INTERVAL: ${VOICE_HEARTBEAT_INTERVAL:-30s}
+      VOICE_CAPACITY: ${VOICE_CAPACITY:-1000}
+
     ports:
-      - "${VOICE_CONTROL_PORT:-9001}:${VOICE_CONTROL_PORT:-9001}"
-      - "${VOICE_UDP_PORT_START:-50000}-${VOICE_UDP_PORT_END:-50100}:${VOICE_UDP_PORT_START:-50000}-${VOICE_UDP_PORT_END:-50100}/udp"
-      - "${VOICE_METRICS_PORT:-9101}:${VOICE_METRICS_PORT:-9101}"
-      - "${VOICE_HEALTH_PORT:-8082}:${VOICE_HEALTH_PORT:-8082}"
+      # Voice CONTROL (TCP)
+      - "${HOST_VOICE_CONTROL_PORT:-9001}:9001"
+
+      # Voice METRICS (TCP): Prometheus scrape for voice node
+      - "${HOST_VOICE_METRICS_PORT:-9101}:9101"
+
+      # Voice HEALTH (TCP): health endpoint for voice node
+      - "${HOST_VOICE_HEALTH_PORT:-8082}:8082"
+
+      # Voice UDP MEDIA PORT RANGE:
+      - "${VOICE_UDP_PORT_START:-50000}-${VOICE_UDP_PORT_END:-52000}:50000-52000/udp"
 
 volumes:
   postgres_data:
