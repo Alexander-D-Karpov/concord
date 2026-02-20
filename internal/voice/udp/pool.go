@@ -62,7 +62,10 @@ func NewServerPool(
 		workChan:       make(chan *poolJob, workChanSize),
 		stopChan:       make(chan struct{}),
 		packetPool: sync.Pool{
-			New: func() interface{} { return make([]byte, maxPacketLen) },
+			New: func() interface{} {
+				b := make([]byte, maxPacketLen)
+				return &b
+			},
 		},
 	}
 
