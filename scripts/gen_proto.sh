@@ -18,10 +18,18 @@ if [ ! -d "$PROTO_DEPS_DIR/grpc-gateway" ]; then
     git clone --depth 1 https://github.com/grpc-ecosystem/grpc-gateway.git "$PROTO_DEPS_DIR/grpc-gateway" 2>/dev/null || true
 fi
 
+if [ ! -d "$PROTO_DEPS_DIR/protobuf" ]; then
+    echo "Downloading protobuf well-known types..."
+    git clone --depth 1 https://github.com/protocolbuffers/protobuf.git "$PROTO_DEPS_DIR/protobuf" 2>/dev/null || true
+fi
+
 mkdir -p ../gen/go
 mkdir -p ../gen/openapiv2
 
-INCLUDES="-I. -I$PROTO_DEPS_DIR/googleapis -I$PROTO_DEPS_DIR/grpc-gateway"
+INCLUDES="-I. \
+-I$PROTO_DEPS_DIR/googleapis \
+-I$PROTO_DEPS_DIR/grpc-gateway \
+-I$PROTO_DEPS_DIR/protobuf/src"
 
 for dir in common/v1 auth/v1 users/v1 rooms/v1 membership/v1 chat/v1 call/v1 registry/v1 admin/v1 friends/v1 dm/v1; do
     echo "Generating for $dir..."
