@@ -1,45 +1,35 @@
 # Build stage
 FROM golang:1.25-alpine AS builder
-
 WORKDIR /app
 
-# Install build dependencies
-RUN apk add --no-cache git make protobuf-dev
+RUN apk add --no-cache git make protobuf
 
-# Install buf with CGO disabled to ensure static linking
-RUN CGO_ENABLED=0 go install github.com/bufbuild/buf/cmd/buf@v1.28.1
+ENV PATH="/go/bin:${PATH}"
 
-# Copy module files
+RUN CGO_ENABLED=0 go install github.com/bufbuild/buf/cmd/buf@v1.28.1 \
+ && go install google.golang.org/protobuf/cmd/protoc-gen-go@latest \
+ && go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest \
+ && go install github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-grpc-gateway@latest \
+ && go install github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-openapiv2@latest
+
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source code
 COPY . .
 
-# Build
+RUN make proto
+
 RUN go build -o /bin/concord-api ./cmd/concord-api
 
 # Final stage
 FROM alpine:3.19
-
 WORKDIR /app
-
-# Install runtime dependencies
 RUN apk add --no-cache ca-certificates
 
-# Copy binary
 COPY --from=builder /bin/concord-api /app/concord-api
-
-# Copy buf binary
 COPY --from=builder /go/bin/buf /usr/local/bin/buf
 
-# Copy proto definitions and config (required for runtime generation)
 COPY api/proto /app/api/proto
-# If you have buf.gen.yaml in root, copy it:
-# COPY buf.gen.yaml /app/buf.gen.yaml
 
-# Expose ports (HTTP Gateway & gRPC)
 EXPOSE 8080 9000 9100 8081
-
-# Run
 CMD ["/app/concord-api"]
