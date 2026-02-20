@@ -71,6 +71,8 @@ func (r *Registrar) Register(ctx context.Context) error {
 		return fmt.Errorf("failed to register: %w", err)
 	}
 
+	r.serverID = resp.Server.Id
+
 	r.logger.Info("registered with main API",
 		zap.String("server_id", resp.Server.Id),
 		zap.String("region", resp.Server.Region),
