@@ -1,9 +1,16 @@
-.PHONY: proto build clean test test-unit test-integration run-api run-voice migrate docker-build lint deps all test-cleanup docker-run docker-stop docker-logs
+.PHONY: proto build clean clean-proto-deps test test-unit test-integration test-coverage test-cleanup \
+        run-api run-voice lint deps install-tools all \
+        up down restart rebuild ps logs logs-api logs-voice logs-db logs-redis \
+        update pull images
 
 ifneq (,$(wildcard ./.env))
     include .env
     export
 endif
+
+COMPOSE_FILE := deploy/docker-compose.yml
+ENV_FILE     := .env
+DC           := docker compose --env-file $(ENV_FILE) -f $(COMPOSE_FILE)
 
 proto:
 	@sh scripts/gen_proto.sh
@@ -44,22 +51,6 @@ run-api:
 run-voice:
 	@go run ./cmd/concord-voice
 
-docker-build:
-	@docker build -f deploy/Dockerfile.api -t concord-api:latest .
-	@docker build -f deploy/Dockerfile.voice -t concord-voice:latest .
-
-docker-run:
-	@echo "Starting Docker environment (rebuilding if necessary)..."
-	@docker-compose -f deploy/docker-compose.yml --env-file .env up --build -d
-	@echo "Environment is up. Use 'make docker-logs' to follow logs."
-
-docker-stop:
-	@echo "Stopping Docker environment..."
-	@docker-compose -f deploy/docker-compose.yml --env-file .env down
-
-docker-logs:
-	@docker-compose -f deploy/docker-compose.yml --env-file .env logs -f
-
 lint:
 	@golangci-lint run ./...
 
@@ -72,5 +63,57 @@ install-tools:
 	@go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 	@go install github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-grpc-gateway@latest
 	@go install github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-openapiv2@latest
+	@go install github.com/bufbuild/buf/cmd/buf@v1.28.1
 
 all: deps proto build
+
+
+up:
+	@echo "Starting docker stack..."
+	@$(DC) up -d
+	@$(DC) ps
+
+down:
+	@echo "Stopping docker stack..."
+	@$(DC) down
+
+restart:
+	@echo "Restarting docker stack..."
+	@$(DC) restart
+	@$(DC) ps
+
+rebuild:
+	@echo "Rebuilding and restarting docker stack..."
+	@$(DC) up -d --build --force-recreate
+	@$(DC) ps
+
+ps:
+	@$(DC) ps
+
+logs:
+	@$(DC) logs -f --tail=200
+
+logs-api:
+	@$(DC) logs -f --tail=200 api
+
+logs-voice:
+	@$(DC) logs -f --tail=200 voice
+
+logs-db:
+	@$(DC) logs -f --tail=200 postgres
+
+logs-redis:
+	@$(DC) logs -f --tail=200 redis
+
+pull:
+	@echo "Pulling images..."
+	@$(DC) pull
+
+images:
+	@$(DC) build
+
+update:
+	@echo "Updating from git and redeploying..."
+	@git pull
+	@$(DC) up -d --build --force-recreate
+	@$(DC) ps
