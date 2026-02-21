@@ -49,15 +49,10 @@ services:
       - ../.env
 
     environment:
-      # docker DNS hostnames
       DB_HOST: postgres
       REDIS_HOST: redis
-
-      # API writes uploads here
       STORAGE_PATH: /media
-
-      # Intentionally NOT setting STORAGE_URL here.
-      # If absent in ../.env -> "null" (inactive).
+      STORAGE_URL: /files
 
     volumes:
       - /var/www/media/concord:/media

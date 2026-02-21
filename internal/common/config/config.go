@@ -172,7 +172,7 @@ func Load() (*Config, error) {
 		},
 		Storage: StorageConfig{
 			Path: getEnv("STORAGE_PATH", "./uploads"),
-			URL:  getEnv("STORAGE_URL", "http://localhost:8080/files"),
+			URL:  getEnv("STORAGE_URL", "/files"),
 		},
 		Email: EmailConfig{
 			SMTPHost: getEnv("EMAIL_SMTP_HOST", "smtp.example.com"),
