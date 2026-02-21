@@ -73,7 +73,7 @@ func (s *Service) isMember(ctx context.Context, roomID, userID uuid.UUID) (bool,
 	return true, nil
 }
 
-func (s *Service) SendMessage(ctx context.Context, roomID, content string, replyToID *int64, mentionIDs []uuid.UUID) (*Message, error) {
+func (s *Service) SendMessage(ctx context.Context, roomID, content string, replyToID *int64, mentionIDs []uuid.UUID, attachments []Attachment) (*Message, error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
 		return nil, errors.Unauthorized("user not authenticated")
@@ -102,9 +102,10 @@ func (s *Service) SendMessage(ctx context.Context, roomID, content string, reply
 	}
 
 	msg := &Message{
-		RoomID:   roomUUID,
-		AuthorID: authorUUID,
-		Content:  content,
+		RoomID:      roomUUID,
+		AuthorID:    authorUUID,
+		Content:     content,
+		Attachments: attachments,
 	}
 
 	if replyToID != nil {
@@ -139,19 +140,34 @@ func (s *Service) SendMessage(ctx context.Context, roomID, content string, reply
 	}
 
 	if s.hub != nil {
+		var protoAttachments []*commonv1.MessageAttachment
+		for _, att := range msg.Attachments {
+			protoAttachments = append(protoAttachments, &commonv1.MessageAttachment{
+				Id:          att.ID.String(),
+				Url:         att.URL,
+				Filename:    att.Filename,
+				ContentType: att.ContentType,
+				Size:        att.Size,
+				Width:       int32(att.Width),
+				Height:      int32(att.Height),
+				CreatedAt:   timestamppb.New(att.CreatedAt),
+			})
+		}
+
 		event := &streamv1.ServerEvent{
 			EventId:   uuid.New().String(),
 			CreatedAt: timestamppb.Now(),
 			Payload: &streamv1.ServerEvent_MessageCreated{
 				MessageCreated: &streamv1.MessageCreated{
 					Message: &commonv1.Message{
-						Id:        strconv.FormatInt(msg.ID, 10),
-						RoomId:    msg.RoomID.String(),
-						AuthorId:  msg.AuthorID.String(),
-						Content:   msg.Content,
-						CreatedAt: timestamppb.New(msg.CreatedAt),
-						ReplyToId: replyToIDStr,
-						Mentions:  mentionStrings,
+						Id:          strconv.FormatInt(msg.ID, 10),
+						RoomId:      msg.RoomID.String(),
+						AuthorId:    msg.AuthorID.String(),
+						Content:     msg.Content,
+						CreatedAt:   timestamppb.New(msg.CreatedAt),
+						ReplyToId:   replyToIDStr,
+						Mentions:    mentionStrings,
+						Attachments: protoAttachments,
 					},
 				},
 			},

@@ -8,11 +8,20 @@ import "google/api/annotations.proto";
 import "google/protobuf/timestamp.proto";
 import "common/v1/types.proto";
 
+message UploadAttachment {
+  string filename = 1;
+  string content_type = 2;
+  bytes data = 3;
+  int32 width = 4;
+  int32 height = 5;
+}
+
 message SendMessageRequest {
   string room_id = 1;
   string content = 2;
   string reply_to_id = 3;
   repeated string mention_user_ids = 4;
+  repeated UploadAttachment attachments = 5;
 }
 
 message SendMessageResponse {

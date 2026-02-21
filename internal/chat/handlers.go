@@ -33,8 +33,8 @@ func NewHandler(service *Service, storage *storage.Storage, readTrackingSvc *rea
 }
 
 func (h *Handler) SendMessage(ctx context.Context, req *chatv1.SendMessageRequest) (*chatv1.SendMessageResponse, error) {
-	if req.RoomId == "" || req.Content == "" {
-		return nil, errors.ToGRPCError(errors.BadRequest("room_id and content are required"))
+	if req.RoomId == "" || (req.Content == "" && len(req.Attachments) == 0) {
+		return nil, errors.ToGRPCError(errors.BadRequest("room_id and content or attachments are required"))
 	}
 
 	var replyToID *int64
@@ -55,7 +55,36 @@ func (h *Handler) SendMessage(ctx context.Context, req *chatv1.SendMessageReques
 		mentionIDs = append(mentionIDs, uid)
 	}
 
-	msg, err := h.service.SendMessage(ctx, req.RoomId, req.Content, replyToID, mentionIDs)
+	var attachments []Attachment
+	for _, att := range req.Attachments {
+		if len(att.Data) == 0 {
+			continue
+		}
+
+		fileInfo, err := h.storage.Store(ctx, att.Data, att.Filename, att.ContentType)
+		if err != nil {
+			return nil, errors.ToGRPCError(errors.BadRequest("failed to store attachment: " + err.Error()))
+		}
+
+		width := int(att.Width)
+		height := int(att.Height)
+		if fileInfo.Width > 0 {
+			width = fileInfo.Width
+			height = fileInfo.Height
+		}
+
+		attachments = append(attachments, Attachment{
+			ID:          uuid.MustParse(fileInfo.ID),
+			URL:         fileInfo.URL,
+			Filename:    att.Filename,
+			ContentType: fileInfo.ContentType,
+			Size:        fileInfo.Size,
+			Width:       width,
+			Height:      height,
+		})
+	}
+
+	msg, err := h.service.SendMessage(ctx, req.RoomId, req.Content, replyToID, mentionIDs, attachments)
 	if err != nil {
 		return nil, errors.ToGRPCError(err)
 	}
