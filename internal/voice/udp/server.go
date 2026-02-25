@@ -196,6 +196,8 @@ func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
 		s.handleReceiverReport(data, addr)
 	case protocol.PacketTypeSubscribe:
 		s.handleSubscribe(data, addr)
+	case protocol.PacketTypeQualityReport:
+		s.handleQualityReport(data, addr)
 	default:
 		s.logger.Debug("unknown packet type", zap.Uint8("type", data[0]))
 	}
@@ -576,4 +578,29 @@ func (s *Server) send(data []byte, addr *net.UDPAddr) error {
 		s.metrics.RecordPacketSent(uint64(len(data)))
 	}
 	return err
+}
+
+func (s *Server) handleQualityReport(data []byte, addr *net.UDPAddr) {
+	if len(data) < 2 {
+		return
+	}
+
+	sess := s.sessionManager.GetByAddr(addr)
+	if sess == nil {
+		return
+	}
+
+	s.sessionManager.Touch(sess.ID)
+
+	sessions := s.sessionManager.GetRoomSessions(sess.RoomID)
+	for _, other := range sessions {
+		if other.ID == sess.ID {
+			continue
+		}
+		to := other.GetAddr()
+		if to == nil {
+			continue
+		}
+		_ = s.send(data, to)
+	}
 }

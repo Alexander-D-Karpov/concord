@@ -27,6 +27,7 @@ const (
 	PacketTypeRR              = 0x0c
 	PacketTypeParticipantLeft = 0x0d
 	PacketTypeSubscribe       = 0x0e
+	PacketTypeQualityReport   = 0x10
 
 	FlagMarker   = 0x01
 	FlagKeyframe = 0x02
@@ -286,6 +287,16 @@ type ParticipantLeftPayload struct {
 
 type SubscribePayload struct {
 	Subscriptions []uint32 `json:"subscriptions"` // List of SSRCs to subscribe to
+}
+
+type QualityReportPayload struct {
+	SSRC       uint32  `json:"ssrc"`
+	UserID     string  `json:"user_id"`
+	RoomID     string  `json:"room_id"`
+	Quality    int     `json:"quality"`
+	RTTMs      float64 `json:"rtt_ms"`
+	PacketLoss float64 `json:"packet_loss"`
+	JitterMs   float64 `json:"jitter_ms"`
 }
 
 func ParseNack(data []byte) (*NackPayload, error) {

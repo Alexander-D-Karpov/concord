@@ -215,6 +215,8 @@ func (p *ServerPool) handlePacket(data []byte, addr *net.UDPAddr, conn *net.UDPC
 		p.handleReceiverReport(data, addr, conn)
 	case protocol.PacketTypeSubscribe:
 		p.handleSubscribe(data, addr, conn)
+	case protocol.PacketTypeQualityReport:
+		p.handleQualityReport(data, addr, conn)
 	}
 }
 
@@ -515,4 +517,29 @@ func (p *ServerPool) send(data []byte, addr *net.UDPAddr, conn *net.UDPConn) err
 		p.metrics.RecordPacketSent(uint64(len(data)))
 	}
 	return err
+}
+
+func (p *ServerPool) handleQualityReport(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {
+	if len(data) < 2 {
+		return
+	}
+
+	sess := p.sessionManager.GetByAddr(addr)
+	if sess == nil {
+		return
+	}
+
+	p.sessionManager.Touch(sess.ID)
+
+	sessions := p.sessionManager.GetRoomSessions(sess.RoomID)
+	for _, other := range sessions {
+		if other.ID == sess.ID {
+			continue
+		}
+		to := other.GetAddr()
+		if to == nil {
+			continue
+		}
+		_ = p.send(data, to, conn)
+	}
 }
