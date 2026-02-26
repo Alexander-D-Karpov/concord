@@ -35,7 +35,7 @@ type Session struct {
 	AudioTS   uint32
 	VideoTS   uint32
 
-	retransmitBuf *RetransmitBuffer
+	retransmitBufs map[uint32]*RetransmitBuffer
 }
 
 func (s *Session) GetAddr() *net.UDPAddr {
@@ -94,17 +94,29 @@ func (s *Session) NextVideoSeq() uint16 {
 	return seq
 }
 
-func (s *Session) StoreForRetransmit(seq uint16, data []byte) {
-	if s.retransmitBuf != nil {
-		s.retransmitBuf.Store(seq, data)
+func (s *Session) StoreForRetransmit(ssrc uint32, seq uint16, data []byte) {
+	s.mu.RLock()
+	buf := s.retransmitBufs[ssrc]
+	s.mu.RUnlock()
+	if buf == nil {
+		s.mu.Lock()
+		if s.retransmitBufs[ssrc] == nil {
+			s.retransmitBufs[ssrc] = NewRetransmitBuffer(500 * time.Millisecond)
+		}
+		buf = s.retransmitBufs[ssrc]
+		s.mu.Unlock()
 	}
+	buf.Store(seq, data)
 }
 
-func (s *Session) GetForRetransmit(seq uint16) []byte {
-	if s.retransmitBuf != nil {
-		return s.retransmitBuf.Get(seq)
+func (s *Session) GetForRetransmit(ssrc uint32, seq uint16) []byte {
+	s.mu.RLock()
+	buf := s.retransmitBufs[ssrc]
+	s.mu.RUnlock()
+	if buf == nil {
+		return nil
 	}
-	return nil
+	return buf.Get(seq)
 }
 
 type RetransmitBuffer struct {
@@ -211,20 +223,20 @@ func (m *Manager) CreateSession(
 	m.nextSSRC++
 
 	sess := &Session{
-		ID:            sessionID,
-		UserID:        userID,
-		RoomID:        roomID,
-		SSRC:          audioSSRC,
-		VideoSSRC:     videoSSRC,
-		ScreenSSRC:    screenSSRC,
-		addr:          addr,
-		lastActivity:  now,
-		Crypto:        sessionCrypto,
-		Muted:         false,
-		VideoEnabled:  videoEnabled,
-		ScreenSharing: false,
-		Speaking:      false,
-		retransmitBuf: NewRetransmitBuffer(500 * time.Millisecond),
+		ID:             sessionID,
+		UserID:         userID,
+		RoomID:         roomID,
+		SSRC:           audioSSRC,
+		VideoSSRC:      videoSSRC,
+		ScreenSSRC:     screenSSRC,
+		addr:           addr,
+		lastActivity:   now,
+		Crypto:         sessionCrypto,
+		Muted:          false,
+		VideoEnabled:   videoEnabled,
+		ScreenSharing:  false,
+		Speaking:       false,
+		retransmitBufs: make(map[uint32]*RetransmitBuffer),
 	}
 
 	m.sessions[sessionID] = sess

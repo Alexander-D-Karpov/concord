@@ -91,7 +91,7 @@ func (h *Handler) handleMedia(data []byte, addr *net.UDPAddr, conn *net.UDPConn)
 
 	h.sessionManager.BindAddr(sess.ID, addr)
 	h.sessionManager.Touch(sess.ID)
-	sess.StoreForRetransmit(pkt.Header.Sequence, data)
+	sess.StoreForRetransmit(pkt.Header.SSRC, pkt.Header.Sequence, data)
 	h.router.RouteMediaRaw(pkt.Header, data, addr, conn)
 }
 
@@ -252,14 +252,12 @@ func (h *Handler) handleNack(data []byte, addr *net.UDPAddr, conn *net.UDPConn) 
 	if err != nil {
 		return
 	}
-
 	target := h.sessionManager.GetBySSRC(nack.SSRC)
 	if target == nil {
 		return
 	}
-
 	for _, seq := range nack.Sequences {
-		if cached := target.GetForRetransmit(seq); cached != nil {
+		if cached := target.GetForRetransmit(nack.SSRC, seq); cached != nil {
 			_ = h.send(cached, addr, conn)
 		}
 	}
