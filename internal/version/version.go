@@ -27,7 +27,7 @@ var concordeFleet = []string{
 
 const (
 	APIMajor = 0
-	APIMinor = 1
+	APIMinor = 2
 	APIPatch = 0
 
 	VoiceMajor = 0

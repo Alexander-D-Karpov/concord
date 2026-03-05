@@ -103,11 +103,40 @@ func (h *Handler) SendDM(ctx context.Context, req *dmv1.SendDMRequest) (*dmv1.Se
 	if req.ChannelId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("channel_id is required"))
 	}
-	if req.Content == "" {
-		return nil, errors.ToGRPCError(errors.BadRequest("content is required"))
+	if req.Content == "" && len(req.Attachments) == 0 {
+		return nil, errors.ToGRPCError(errors.BadRequest("content or attachments are required"))
 	}
 
-	msg, err := h.service.SendMessage(ctx, req.ChannelId, req.Content, req.ReplyToId, nil, nil)
+	var attachments []DMAttachment
+	for _, att := range req.Attachments {
+		if len(att.Data) == 0 {
+			continue
+		}
+
+		fileInfo, err := h.storage.Store(ctx, att.Data, att.Filename, att.ContentType)
+		if err != nil {
+			return nil, errors.ToGRPCError(errors.BadRequest("failed to store attachment: " + err.Error()))
+		}
+
+		width := int(att.Width)
+		height := int(att.Height)
+		if fileInfo.Width > 0 {
+			width = fileInfo.Width
+			height = fileInfo.Height
+		}
+
+		attachments = append(attachments, DMAttachment{
+			ID:          uuid.MustParse(fileInfo.ID),
+			URL:         fileInfo.URL,
+			Filename:    att.Filename,
+			ContentType: fileInfo.ContentType,
+			Size:        fileInfo.Size,
+			Width:       width,
+			Height:      height,
+		})
+	}
+
+	msg, err := h.service.SendMessage(ctx, req.ChannelId, req.Content, req.ReplyToId, attachments, nil)
 	if err != nil {
 		return nil, errors.ToGRPCError(err)
 	}
