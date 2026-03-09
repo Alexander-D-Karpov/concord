@@ -2,6 +2,8 @@ package chat
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Alexander-D-Karpov/concord/internal/common/errors"
@@ -661,49 +663,96 @@ func timePtr(t time.Time) *time.Time {
 }
 
 func (r *Repository) Search(ctx context.Context, roomID uuid.UUID, query string, limit int) ([]*Message, error) {
-	sqlQuery := `
+	parsed := parseSearchQuery(query)
+
+	conditions := []string{"m.room_id = $1", "m.deleted_at IS NULL"}
+	args := []interface{}{roomID}
+	argIdx := 2
+
+	if parsed.FTSQuery != "" {
+		conditions = append(conditions, fmt.Sprintf("to_tsvector('simple', m.content) @@ plainto_tsquery('simple', $%d)", argIdx))
+		args = append(args, parsed.FTSQuery)
+		argIdx++
+	}
+
+	if parsed.FromHandle != "" {
+		conditions = append(conditions, fmt.Sprintf(
+			"m.author_id = (SELECT id FROM users WHERE lower(handle) = lower($%d) LIMIT 1)", argIdx))
+		args = append(args, parsed.FromHandle)
+		argIdx++
+	}
+
+	sqlQuery := fmt.Sprintf(`
 		SELECT m.id, m.room_id, m.author_id, m.content, m.created_at, m.edited_at, m.deleted_at,
 		       m.reply_to_id, m.reply_count,
 		       COALESCE((SELECT true FROM pinned_messages WHERE message_id = m.id), false) as pinned
 		FROM messages m
-		WHERE m.room_id = $1 
-		AND m.deleted_at IS NULL
-		AND m.content ILIKE '%' || $2 || '%'
-		ORDER BY m.created_at DESC
-		LIMIT $3
-	`
+		WHERE %s
+		ORDER BY m.id DESC
+		LIMIT $%d
+	`, strings.Join(conditions, " AND "), argIdx)
+	args = append(args, limit)
 
-	rows, err := r.pool.Query(ctx, sqlQuery, roomID, query, limit)
+	rows, err := r.pool.Query(ctx, sqlQuery, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	var messages []*Message
+	var messageIDs []int64
 	for rows.Next() {
 		msg := &Message{}
 		if err := rows.Scan(
-			&msg.ID,
-			&msg.RoomID,
-			&msg.AuthorID,
-			&msg.Content,
-			&msg.CreatedAt,
-			&msg.EditedAt,
-			&msg.DeletedAt,
-			&msg.ReplyToID,
-			&msg.ReplyCount,
-			&msg.Pinned,
+			&msg.ID, &msg.RoomID, &msg.AuthorID, &msg.Content,
+			&msg.CreatedAt, &msg.EditedAt, &msg.DeletedAt,
+			&msg.ReplyToID, &msg.ReplyCount, &msg.Pinned,
 		); err != nil {
 			return nil, err
 		}
-
-		msg.Reactions, _ = r.GetReactions(ctx, msg.ID)
-		msg.Attachments, _ = r.GetAttachments(ctx, msg.ID)
-
 		messages = append(messages, msg)
+		messageIDs = append(messageIDs, msg.ID)
 	}
 
-	return messages, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(messageIDs) > 0 {
+		reactionsMap, _ := r.GetReactionsBatch(ctx, messageIDs)
+		attachmentsMap, _ := r.GetAttachmentsBatch(ctx, messageIDs)
+		mentionsMap, _ := r.GetMentionsBatch(ctx, messageIDs)
+		for _, msg := range messages {
+			msg.Reactions = reactionsMap[msg.ID]
+			msg.Attachments = attachmentsMap[msg.ID]
+			msg.Mentions = mentionsMap[msg.ID]
+		}
+	}
+
+	return messages, nil
+}
+
+type parsedSearch struct {
+	FTSQuery   string
+	FromHandle string
+}
+
+func parseSearchQuery(raw string) parsedSearch {
+	p := parsedSearch{}
+	var remaining []string
+
+	parts := strings.Fields(raw)
+	for _, part := range parts {
+		lower := strings.ToLower(part)
+		if strings.HasPrefix(lower, "from:") {
+			p.FromHandle = strings.TrimPrefix(part, "from:")
+		} else {
+			remaining = append(remaining, part)
+		}
+	}
+
+	p.FTSQuery = strings.Join(remaining, " ")
+	return p
 }
 
 func (r *Repository) CreateMentions(ctx context.Context, messageID int64, userIDs []uuid.UUID) error {

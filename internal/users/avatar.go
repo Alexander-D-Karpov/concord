@@ -31,9 +31,38 @@ type ProcessedAvatar struct {
 	Height    int
 }
 
+var magicBytes = map[string][]byte{
+	"image/jpeg": {0xFF, 0xD8, 0xFF},
+	"image/png":  {0x89, 0x50, 0x4E, 0x47},
+	"image/gif":  {0x47, 0x49, 0x46},
+	"image/webp": {0x52, 0x49, 0x46, 0x46},
+}
+
+func ValidateImageMagic(data []byte) (string, error) {
+	for mime, magic := range magicBytes {
+		if len(data) >= len(magic) {
+			match := true
+			for i, b := range magic {
+				if data[i] != b {
+					match = false
+					break
+				}
+			}
+			if match {
+				return mime, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("unrecognized image format")
+}
+
 func ProcessAvatarImage(data []byte) (*ProcessedAvatar, error) {
 	if len(data) > MaxAvatarBytes {
 		return nil, fmt.Errorf("image too large: %d bytes (max %d)", len(data), MaxAvatarBytes)
+	}
+
+	if _, err := ValidateImageMagic(data); err != nil {
+		return nil, fmt.Errorf("invalid image: %w", err)
 	}
 
 	src, _, err := image.Decode(bytes.NewReader(data))
@@ -41,6 +70,7 @@ func ProcessAvatarImage(data []byte) (*ProcessedAvatar, error) {
 		return nil, fmt.Errorf("decode image: %w", err)
 	}
 
+	// Re-encoding to JPEG strips all EXIF/metadata automatically
 	bounds := src.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
 

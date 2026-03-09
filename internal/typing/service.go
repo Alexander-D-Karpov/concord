@@ -2,6 +2,7 @@ package typing
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	streamv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/stream/v1"
@@ -15,6 +16,8 @@ type Service struct {
 	repo      *Repository
 	hub       *events.Hub
 	usersRepo *users.Repository
+	rateMu    sync.Mutex
+	lastTyped map[string]time.Time
 }
 
 func NewService(repo *Repository, hub *events.Hub, usersRepo *users.Repository) *Service {
@@ -22,10 +25,40 @@ func NewService(repo *Repository, hub *events.Hub, usersRepo *users.Repository) 
 		repo:      repo,
 		hub:       hub,
 		usersRepo: usersRepo,
+		lastTyped: make(map[string]time.Time),
 	}
 }
 
+const typingRateLimit = 2 * time.Second
+
+func (s *Service) checkTypingRate(userID uuid.UUID, targetID uuid.UUID) bool {
+	key := userID.String() + ":" + targetID.String()
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+
+	now := time.Now()
+	if last, ok := s.lastTyped[key]; ok && now.Sub(last) < typingRateLimit {
+		return false
+	}
+	s.lastTyped[key] = now
+
+	if len(s.lastTyped) > 10000 {
+		cutoff := now.Add(-typingRateLimit * 2)
+		for k, t := range s.lastTyped {
+			if t.Before(cutoff) {
+				delete(s.lastTyped, k)
+			}
+		}
+	}
+
+	return true
+}
+
 func (s *Service) StartTypingInRoom(ctx context.Context, userID, roomID uuid.UUID) error {
+	if !s.checkTypingRate(userID, roomID) {
+		return nil
+	}
+
 	if err := s.repo.SetTypingInRoom(ctx, userID, roomID); err != nil {
 		return err
 	}
@@ -44,6 +77,10 @@ func (s *Service) StopTypingInRoom(ctx context.Context, userID, roomID uuid.UUID
 }
 
 func (s *Service) StartTypingInDM(ctx context.Context, userID, channelID uuid.UUID, otherUserID uuid.UUID) error {
+	if !s.checkTypingRate(userID, channelID) {
+		return nil
+	}
+
 	if err := s.repo.SetTypingInDM(ctx, userID, channelID); err != nil {
 		return err
 	}

@@ -11,10 +11,12 @@ import (
 	"syscall"
 	"time"
 
+	unfurlv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/unfurl/v1"
 	"github.com/Alexander-D-Karpov/concord/internal/readtracking"
 	"github.com/Alexander-D-Karpov/concord/internal/security"
 	"github.com/Alexander-D-Karpov/concord/internal/swagger"
 	"github.com/Alexander-D-Karpov/concord/internal/typing"
+	"github.com/Alexander-D-Karpov/concord/internal/unfurl"
 	"github.com/Alexander-D-Karpov/concord/internal/version"
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"
@@ -244,6 +246,9 @@ func run() error {
 	dmHandler.SetReadTrackingService(readTrackingSvc)
 	dmHandler.SetTypingService(typingSvc)
 
+	unfurlService := unfurl.NewService(cacheClient)
+	unfurlHandler := unfurl.NewHandler(unfurlService)
+
 	var oauthManager *oauth.Manager
 	if len(cfg.Auth.OAuth) > 0 {
 		oauthManager = oauth.NewManager(cfg.Auth)
@@ -311,6 +316,7 @@ func run() error {
 	friendsv1.RegisterFriendsServiceServer(grpcServer, friendsHandler)
 	adminv1.RegisterAdminServiceServer(grpcServer, adminHandler)
 	dmv1.RegisterDMServiceServer(grpcServer, dmHandler)
+	unfurlv1.RegisterUnfurlServiceServer(grpcServer, unfurlHandler)
 	reflection.Register(grpcServer)
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Server.GRPCPort))

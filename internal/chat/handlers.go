@@ -94,6 +94,37 @@ func (h *Handler) SendMessage(ctx context.Context, req *chatv1.SendMessageReques
 	}, nil
 }
 
+func (h *Handler) ListMessagesSince(ctx context.Context, req *chatv1.ListMessagesSinceRequest) (*chatv1.ListMessagesSinceResponse, error) {
+	if req.RoomId == "" || req.AfterMessageId == "" {
+		return nil, errors.ToGRPCError(errors.BadRequest("room_id and after_message_id are required"))
+	}
+
+	afterID, err := strconv.ParseInt(req.AfterMessageId, 10, 64)
+	if err != nil {
+		return nil, errors.ToGRPCError(errors.BadRequest("invalid after_message_id"))
+	}
+
+	limit := int(req.Limit)
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+
+	messages, hasMore, err := h.service.ListMessages(ctx, req.RoomId, nil, &afterID, limit)
+	if err != nil {
+		return nil, errors.ToGRPCError(err)
+	}
+
+	protoMessages := make([]*commonv1.Message, len(messages))
+	for i, msg := range messages {
+		protoMessages[i] = toProtoMessage(msg)
+	}
+
+	return &chatv1.ListMessagesSinceResponse{
+		Messages: protoMessages,
+		HasMore:  hasMore,
+	}, nil
+}
+
 func (h *Handler) EditMessage(ctx context.Context, req *chatv1.EditMessageRequest) (*chatv1.EditMessageResponse, error) {
 	if req.RoomId == "" || req.MessageId == "" || req.Content == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id, message_id and content are required"))

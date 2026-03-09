@@ -13,6 +13,7 @@ import (
 	friendsv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/friends/v1"
 	membershipv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/membership/v1"
 	roomsv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/rooms/v1"
+	unfurlv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/unfurl/v1"
 	usersv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/users/v1"
 	"github.com/Alexander-D-Karpov/concord/internal/middleware"
 	"github.com/Alexander-D-Karpov/concord/internal/version"
@@ -62,6 +63,7 @@ func (g *Gateway) Init(ctx context.Context) error {
 		callv1.RegisterCallServiceHandlerFromEndpoint,
 		friendsv1.RegisterFriendsServiceHandlerFromEndpoint,
 		dmv1.RegisterDMServiceHandlerFromEndpoint,
+		unfurlv1.RegisterUnfurlServiceHandlerFromEndpoint,
 	}
 
 	for _, register := range handlers {

@@ -31,7 +31,7 @@ INCLUDES="-I. \
 -I$PROTO_DEPS_DIR/grpc-gateway \
 -I$PROTO_DEPS_DIR/protobuf/src"
 
-for dir in common/v1 auth/v1 users/v1 rooms/v1 membership/v1 chat/v1 call/v1 registry/v1 admin/v1 friends/v1 dm/v1; do
+for dir in common/v1 auth/v1 users/v1 rooms/v1 membership/v1 chat/v1 call/v1 registry/v1 admin/v1 friends/v1 dm/v1 unfurl/v1; do
     echo "Generating for $dir..."
 
     protoc $INCLUDES \
@@ -67,6 +67,7 @@ protoc $INCLUDES \
     call/v1/*.proto \
     friends/v1/*.proto \
     dm/v1/*.proto \
-    admin/v1/*.proto
+    admin/v1/*.proto \
+    unfurl/v1/*.proto
 
 echo "Protobuf generation complete!"

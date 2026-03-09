@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package concord.unfurl.v1;
+
+option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/unfurl/v1;unfurlv1";
+
+import "google/api/annotations.proto";
+
+message UnfurlRequest {
+  string url = 1;
+}
+
+message UnfurlResponse {
+  string url = 1;
+  string title = 2;
+  string description = 3;
+  string image = 4;
+  string site_name = 5;
+  string favicon = 6;
+}
+
+service UnfurlService {
+  rpc Unfurl(UnfurlRequest) returns (UnfurlResponse) {
+    option (google.api.http) = {
+      get: "/v1/unfurl"
+    };
+  }
+}
