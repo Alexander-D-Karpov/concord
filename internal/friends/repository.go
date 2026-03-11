@@ -99,8 +99,9 @@ func (r *Repository) CreateFriendRequest(ctx context.Context, fromUserID, toUser
 	query := `
 		INSERT INTO friend_requests (id, from_user_id, to_user_id, status)
 		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (from_user_id, to_user_id) DO UPDATE SET status = 'pending', updated_at = NOW()
-		RETURNING created_at, updated_at
+		ON CONFLICT (from_user_id, to_user_id)
+		DO UPDATE SET status = 'pending', updated_at = NOW()
+		RETURNING id, created_at, updated_at
 	`
 
 	err := r.pool.QueryRow(ctx, query,
@@ -108,7 +109,7 @@ func (r *Repository) CreateFriendRequest(ctx context.Context, fromUserID, toUser
 		req.FromUserID,
 		req.ToUserID,
 		req.Status,
-	).Scan(&req.CreatedAt, &req.UpdatedAt)
+	).Scan(&req.ID, &req.CreatedAt, &req.UpdatedAt)
 
 	if err != nil {
 		return nil, err

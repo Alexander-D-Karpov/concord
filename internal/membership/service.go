@@ -113,18 +113,24 @@ func (s *Service) CreateRoomInvite(ctx context.Context, roomID, userID string) (
 	}
 
 	if s.hub != nil {
-		s.hub.BroadcastToUser(userID, &streamv1.ServerEvent{
+		protoInvite := toProtoRoomInvite(toRoomInviteWithUsers(inviteWithUsers))
+		event := &streamv1.ServerEvent{
 			EventId:   uuid.New().String(),
 			CreatedAt: timestamppb.Now(),
-			Payload: &streamv1.ServerEvent_RoomInviteReceived{
-				RoomInviteReceived: &streamv1.RoomInviteReceived{
-					RoomId:             roomID,
-					RoomName:           inviteWithUsers.RoomName,
-					InvitedBy:          currentUserID,
-					InviterDisplayName: inviteWithUsers.InviterDisplayName,
+			Payload: &streamv1.ServerEvent_RoomInviteCreated{
+				RoomInviteCreated: &streamv1.RoomInviteCreated{
+					Invite: protoInvite,
 				},
 			},
-		})
+		}
+
+		// recipient needs this for incoming invites
+		s.hub.BroadcastToUser(invitedUUID.String(), event)
+
+		// inviter needs this for outgoing invites
+		if inviterUUID != invitedUUID {
+			s.hub.BroadcastToUser(inviterUUID.String(), event)
+		}
 	}
 
 	return toRoomInviteWithUsers(inviteWithUsers), nil
@@ -167,11 +173,37 @@ func (s *Service) AcceptRoomInvite(ctx context.Context, inviteID string) (*rooms
 		return nil, errors.Internal("failed to update invite status", err)
 	}
 
-	if s.hub != nil {
-		s.hub.NotifyRoomJoinSync(userID, invite.RoomID.String())
+	// invalidate cached room list for the user who just joined
+	if s.cache != nil {
+		_ = s.cache.Invalidate(ctx, fmt.Sprintf("u:%s:rooms", userID))
+	}
+
+	updatedInvite, err := s.roomRepo.GetRoomInviteWithUsers(ctx, inviteUUID)
+	if err != nil {
+		return nil, errors.Internal("failed to get updated invite", err)
 	}
 
 	if s.hub != nil {
+		s.hub.NotifyRoomJoinSync(userID, invite.RoomID.String())
+
+		protoInvite := toProtoRoomInvite(toRoomInviteWithUsers(updatedInvite))
+		inviteEvent := &streamv1.ServerEvent{
+			EventId:   uuid.New().String(),
+			CreatedAt: timestamppb.Now(),
+			Payload: &streamv1.ServerEvent_RoomInviteUpdated{
+				RoomInviteUpdated: &streamv1.RoomInviteUpdated{
+					Invite: protoInvite,
+				},
+			},
+		}
+
+		// recipient
+		s.hub.BroadcastToUser(updatedInvite.InvitedUserID.String(), inviteEvent)
+		// inviter
+		if updatedInvite.InvitedBy != updatedInvite.InvitedUserID {
+			s.hub.BroadcastToUser(updatedInvite.InvitedBy.String(), inviteEvent)
+		}
+
 		s.hub.BroadcastToRoom(invite.RoomID.String(), &streamv1.ServerEvent{
 			EventId:   uuid.New().String(),
 			CreatedAt: timestamppb.Now(),
@@ -220,7 +252,32 @@ func (s *Service) RejectRoomInvite(ctx context.Context, inviteID string) error {
 		return errors.Conflict("invite already processed")
 	}
 
-	return s.roomRepo.UpdateRoomInviteStatus(ctx, inviteUUID, "rejected")
+	if err := s.roomRepo.UpdateRoomInviteStatus(ctx, inviteUUID, "rejected"); err != nil {
+		return err
+	}
+
+	if s.hub != nil {
+		updatedInvite, err := s.roomRepo.GetRoomInviteWithUsers(ctx, inviteUUID)
+		if err == nil {
+			protoInvite := toProtoRoomInvite(toRoomInviteWithUsers(updatedInvite))
+			event := &streamv1.ServerEvent{
+				EventId:   uuid.New().String(),
+				CreatedAt: timestamppb.Now(),
+				Payload: &streamv1.ServerEvent_RoomInviteUpdated{
+					RoomInviteUpdated: &streamv1.RoomInviteUpdated{
+						Invite: protoInvite,
+					},
+				},
+			}
+
+			s.hub.BroadcastToUser(updatedInvite.InvitedUserID.String(), event)
+			if updatedInvite.InvitedBy != updatedInvite.InvitedUserID {
+				s.hub.BroadcastToUser(updatedInvite.InvitedBy.String(), event)
+			}
+		}
+	}
+
+	return nil
 }
 
 func (s *Service) CancelRoomInvite(ctx context.Context, inviteID string) error {
@@ -252,7 +309,32 @@ func (s *Service) CancelRoomInvite(ctx context.Context, inviteID string) error {
 		return errors.Conflict("invite already processed")
 	}
 
-	return s.roomRepo.UpdateRoomInviteStatus(ctx, inviteUUID, "rejected")
+	if err := s.roomRepo.UpdateRoomInviteStatus(ctx, inviteUUID, "rejected"); err != nil {
+		return err
+	}
+
+	if s.hub != nil {
+		updatedInvite, err := s.roomRepo.GetRoomInviteWithUsers(ctx, inviteUUID)
+		if err == nil {
+			protoInvite := toProtoRoomInvite(toRoomInviteWithUsers(updatedInvite))
+			event := &streamv1.ServerEvent{
+				EventId:   uuid.New().String(),
+				CreatedAt: timestamppb.Now(),
+				Payload: &streamv1.ServerEvent_RoomInviteUpdated{
+					RoomInviteUpdated: &streamv1.RoomInviteUpdated{
+						Invite: protoInvite,
+					},
+				},
+			}
+
+			s.hub.BroadcastToUser(updatedInvite.InvitedUserID.String(), event)
+			if updatedInvite.InvitedBy != updatedInvite.InvitedUserID {
+				s.hub.BroadcastToUser(updatedInvite.InvitedBy.String(), event)
+			}
+		}
+	}
+
+	return nil
 }
 
 func (s *Service) ListRoomInvites(ctx context.Context) (incoming, outgoing []*RoomInviteWithUsers, err error) {

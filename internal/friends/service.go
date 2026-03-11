@@ -91,52 +91,44 @@ func (s *Service) SendFriendRequest(ctx context.Context, toUserID string) (*Frie
 	}
 
 	if s.hub != nil {
-		s.hub.BroadcastToUser(toUserID, &streamv1.ServerEvent{
+		protoRequest := &friendsv1.FriendRequest{
+			Id:              request.ID.String(),
+			FromUserId:      fromUserID,
+			ToUserId:        toUserID,
+			Status:          friendsv1.FriendRequestStatus_FRIEND_REQUEST_STATUS_PENDING,
+			CreatedAt:       timestamppb.New(request.CreatedAt),
+			UpdatedAt:       timestamppb.New(request.UpdatedAt),
+			FromHandle:      fromUser.Handle,
+			FromDisplayName: fromUser.DisplayName,
+			FromAvatarUrl:   fromUser.AvatarURL,
+			ToHandle:        toUser.Handle,
+			ToDisplayName:   toUser.DisplayName,
+			ToAvatarUrl:     toUser.AvatarURL,
+		}
+
+		toEvent := &streamv1.ServerEvent{
 			EventId:   uuid.New().String(),
 			CreatedAt: timestamppb.Now(),
 			Payload: &streamv1.ServerEvent_FriendRequestCreated{
 				FriendRequestCreated: &streamv1.FriendRequestCreated{
-					Request: &friendsv1.FriendRequest{
-						Id:              request.ID.String(),
-						FromUserId:      fromUserID,
-						ToUserId:        toUserID,
-						Status:          friendsv1.FriendRequestStatus_FRIEND_REQUEST_STATUS_PENDING,
-						CreatedAt:       timestamppb.New(request.CreatedAt),
-						UpdatedAt:       timestamppb.New(request.UpdatedAt),
-						FromHandle:      fromUser.Handle,
-						FromDisplayName: fromUser.DisplayName,
-						FromAvatarUrl:   fromUser.AvatarURL,
-						ToHandle:        toUser.Handle,
-						ToDisplayName:   toUser.DisplayName,
-						ToAvatarUrl:     toUser.AvatarURL,
-					},
+					Request: protoRequest,
 				},
 			},
-		})
-	}
+		}
 
-	s.hub.BroadcastToUser(fromUserID, &streamv1.ServerEvent{
-		EventId:   uuid.New().String(),
-		CreatedAt: timestamppb.Now(),
-		Payload: &streamv1.ServerEvent_FriendRequestCreated{
-			FriendRequestCreated: &streamv1.FriendRequestCreated{
-				Request: &friendsv1.FriendRequest{
-					Id:              request.ID.String(),
-					FromUserId:      fromUserID,
-					ToUserId:        toUserID,
-					Status:          friendsv1.FriendRequestStatus_FRIEND_REQUEST_STATUS_PENDING,
-					CreatedAt:       timestamppb.New(request.CreatedAt),
-					UpdatedAt:       timestamppb.New(request.UpdatedAt),
-					FromHandle:      fromUser.Handle,
-					FromDisplayName: fromUser.DisplayName,
-					FromAvatarUrl:   fromUser.AvatarURL,
-					ToHandle:        toUser.Handle,
-					ToDisplayName:   toUser.DisplayName,
-					ToAvatarUrl:     toUser.AvatarURL,
+		fromEvent := &streamv1.ServerEvent{
+			EventId:   uuid.New().String(),
+			CreatedAt: timestamppb.Now(),
+			Payload: &streamv1.ServerEvent_FriendRequestCreated{
+				FriendRequestCreated: &streamv1.FriendRequestCreated{
+					Request: protoRequest,
 				},
 			},
-		},
-	})
+		}
+
+		s.hub.BroadcastToUser(toUserID, toEvent)
+		s.hub.BroadcastToUser(fromUserID, fromEvent)
+	}
 
 	return request, fromUser, toUser, nil
 }
@@ -368,23 +360,25 @@ func (s *Service) RemoveFriend(ctx context.Context, friendUserID string) error {
 	}
 
 	if s.hub != nil {
+		// notify the removed friend that the current user disappeared from their friend list
 		s.hub.BroadcastToUser(friendUserID, &streamv1.ServerEvent{
 			EventId:   uuid.New().String(),
 			CreatedAt: timestamppb.Now(),
 			Payload: &streamv1.ServerEvent_FriendRemoved{
 				FriendRemoved: &streamv1.FriendRemoved{
-					UserId:    friendUserID,
+					UserId:    userID,
 					RemovedBy: userID,
 				},
 			},
 		})
 
+		// notify the current user that the other user disappeared from their friend list
 		s.hub.BroadcastToUser(userID, &streamv1.ServerEvent{
 			EventId:   uuid.New().String(),
 			CreatedAt: timestamppb.Now(),
 			Payload: &streamv1.ServerEvent_FriendRemoved{
 				FriendRemoved: &streamv1.FriendRemoved{
-					UserId:    userID,
+					UserId:    friendUserID,
 					RemovedBy: userID,
 				},
 			},
@@ -452,13 +446,44 @@ func (s *Service) BlockUser(ctx context.Context, blockedUserID string) error {
 		return errors.BadRequest("cannot block yourself")
 	}
 
-	_ = s.repo.DeleteFriendship(ctx, userUUID, blockedUUID)
+	friendshipRemoved := false
+	if err := s.repo.DeleteFriendship(ctx, userUUID, blockedUUID); err == nil {
+		friendshipRemoved = true
+	} else if !errors.IsNotFound(err) {
+		return err
+	}
 
 	if err := s.repo.BlockUser(ctx, userUUID, blockedUUID); err != nil {
 		return err
 	}
 
 	if s.hub != nil {
+		if friendshipRemoved {
+			// blocked user should remove blocker from their friend list
+			s.hub.BroadcastToUser(blockedUserID, &streamv1.ServerEvent{
+				EventId:   uuid.New().String(),
+				CreatedAt: timestamppb.Now(),
+				Payload: &streamv1.ServerEvent_FriendRemoved{
+					FriendRemoved: &streamv1.FriendRemoved{
+						UserId:    userID,
+						RemovedBy: userID,
+					},
+				},
+			})
+
+			// blocker should remove blocked user from their friend list
+			s.hub.BroadcastToUser(userID, &streamv1.ServerEvent{
+				EventId:   uuid.New().String(),
+				CreatedAt: timestamppb.Now(),
+				Payload: &streamv1.ServerEvent_FriendRemoved{
+					FriendRemoved: &streamv1.FriendRemoved{
+						UserId:    blockedUserID,
+						RemovedBy: userID,
+					},
+				},
+			})
+		}
+
 		s.hub.BroadcastToUser(blockedUserID, &streamv1.ServerEvent{
 			EventId:   uuid.New().String(),
 			CreatedAt: timestamppb.Now(),
