@@ -451,8 +451,13 @@ func (r *Repository) AssignVoiceServer(ctx context.Context, roomID, serverID uui
 	return err
 }
 
-func (r *Repository) CreateRoomInvite(ctx context.Context, roomID, invitedUserID, invitedBy uuid.UUID) (*RoomInvite, error) {
-	invite := &RoomInvite{
+func (r *Repository) CreateRoomInvite(
+	ctx context.Context,
+	roomID uuid.UUID,
+	invitedUserID uuid.UUID,
+	invitedBy uuid.UUID,
+) (*RoomInvite, error) {
+	inv := &RoomInvite{
 		ID:            uuid.New(),
 		RoomID:        roomID,
 		InvitedUserID: invitedUserID,
@@ -461,24 +466,30 @@ func (r *Repository) CreateRoomInvite(ctx context.Context, roomID, invitedUserID
 	}
 
 	query := `
-		INSERT INTO room_invites (id, room_id, invited_user_id, invited_by, status)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (room_id, invited_user_id) DO UPDATE SET
-			invited_by = $4,
-			status = 'pending',
-			updated_at = NOW()
-		RETURNING created_at, updated_at
-	`
+        INSERT INTO room_invites (id, room_id, invited_user_id, invited_by, status)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (room_id, invited_user_id)
+        DO UPDATE SET
+            status = 'pending',
+            invited_by = EXCLUDED.invited_by,
+            updated_at = NOW()
+        RETURNING id, created_at, updated_at
+    `
 
-	err := r.pool.QueryRow(ctx, query,
-		invite.ID,
-		invite.RoomID,
-		invite.InvitedUserID,
-		invite.InvitedBy,
-		invite.Status,
-	).Scan(&invite.CreatedAt, &invite.UpdatedAt)
+	err := r.pool.QueryRow(
+		ctx,
+		query,
+		inv.ID,
+		inv.RoomID,
+		inv.InvitedUserID,
+		inv.InvitedBy,
+		inv.Status,
+	).Scan(&inv.ID, &inv.CreatedAt, &inv.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
 
-	return invite, err
+	return inv, nil
 }
 
 func (r *Repository) GetRoomInvite(ctx context.Context, id uuid.UUID) (*RoomInvite, error) {

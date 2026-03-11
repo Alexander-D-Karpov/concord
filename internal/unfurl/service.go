@@ -76,7 +76,9 @@ func (s *Service) Unfurl(ctx context.Context, rawURL string) (*LinkPreview, erro
 	if err != nil {
 		return nil, fmt.Errorf("fetch failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
