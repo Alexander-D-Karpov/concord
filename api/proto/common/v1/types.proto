@@ -22,6 +22,7 @@ message User {
   string status = 6;
   string bio = 7;
   string avatar_thumbnail_url = 8;
+  string status_preference = 9;
 }
 
 message AvatarEntry {

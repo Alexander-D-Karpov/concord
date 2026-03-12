@@ -18,13 +18,15 @@ type Service struct {
 	repo      *Repository
 	hub       *events.Hub
 	usersRepo *users.Repository
+	presence  *users.PresenceManager
 }
 
-func NewService(repo *Repository, hub *events.Hub, usersRepo *users.Repository) *Service {
+func NewService(repo *Repository, hub *events.Hub, usersRepo *users.Repository, presence *users.PresenceManager) *Service {
 	return &Service{
 		repo:      repo,
 		hub:       hub,
 		usersRepo: usersRepo,
+		presence:  presence,
 	}
 }
 
@@ -399,7 +401,24 @@ func (s *Service) ListFriends(ctx context.Context) ([]*Friend, error) {
 		return nil, errors.BadRequest("invalid user id")
 	}
 
-	return s.repo.ListFriends(ctx, userUUID)
+	friends, err := s.repo.ListFriends(ctx, userUUID)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, friend := range friends {
+		presence := users.StatusOffline
+		if s.presence != nil {
+			presence = s.presence.GetStatus(friend.UserID)
+		}
+
+		friend.Status = users.EffectiveStatus(
+			users.NormalizeStatusPreference(friend.Status),
+			presence,
+		)
+	}
+
+	return friends, nil
 }
 
 func (s *Service) ListPendingRequests(ctx context.Context) (incoming, outgoing []*FriendRequestWithUser, err error) {

@@ -22,17 +22,41 @@ type Service struct {
 	usersRepo   *users.Repository
 	hub         *events.Hub
 	voiceAssign *voiceassign.Service
+	presence    *users.PresenceManager
 	logger      *zap.Logger
 }
 
-func NewService(repo *Repository, msgRepo *MessageRepository, usersRepo *users.Repository, hub *events.Hub, voiceAssign *voiceassign.Service, logger *zap.Logger) *Service {
+func NewService(
+	repo *Repository,
+	msgRepo *MessageRepository,
+	usersRepo *users.Repository,
+	hub *events.Hub,
+	voiceAssign *voiceassign.Service,
+	presence *users.PresenceManager,
+	logger *zap.Logger,
+) *Service {
 	return &Service{
 		repo:        repo,
 		msgRepo:     msgRepo,
 		usersRepo:   usersRepo,
 		hub:         hub,
 		voiceAssign: voiceAssign,
+		presence:    presence,
 		logger:      logger,
+	}
+}
+
+func (s *Service) decorateChannelStatuses(channels []*DMChannelWithUser) {
+	for _, ch := range channels {
+		presence := users.StatusOffline
+		if s.presence != nil {
+			presence = s.presence.GetStatus(ch.OtherUserID)
+		}
+
+		ch.OtherUserStatus = users.EffectiveStatus(
+			users.NormalizeStatusPreference(ch.OtherUserStatus),
+			presence,
+		)
 	}
 }
 
@@ -80,7 +104,13 @@ func (s *Service) ListDMs(ctx context.Context) ([]*DMChannelWithUser, error) {
 		return nil, errors.BadRequest("invalid user id")
 	}
 
-	return s.repo.ListByUser(ctx, userUUID)
+	channels, err := s.repo.ListByUser(ctx, userUUID)
+	if err != nil {
+		return nil, err
+	}
+
+	s.decorateChannelStatuses(channels)
+	return channels, nil
 }
 
 func (s *Service) CloseDM(ctx context.Context, channelID string) error {

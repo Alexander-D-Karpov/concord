@@ -160,6 +160,7 @@ func toProtoUser(user *User) *commonv1.User {
 		AvatarThumbnailUrl: user.AvatarThumbnailURL,
 		CreatedAt:          timestamppb.New(user.CreatedAt),
 		Status:             user.Status,
+		StatusPreference:   user.StatusPreference,
 	}
 	if user.Bio != "" {
 		proto.Bio = user.Bio

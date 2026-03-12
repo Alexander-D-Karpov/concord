@@ -15,16 +15,82 @@ import (
 type Service struct {
 	repo        *Repository
 	hub         *events.Hub
+	presence    *PresenceManager
 	storagePath string
 	storageURL  string
 }
 
-func NewService(repo *Repository, hub *events.Hub, storagePath, storageURL string) *Service {
+func NewService(repo *Repository, hub *events.Hub, presence *PresenceManager, storagePath, storageURL string) *Service {
 	return &Service{
 		repo:        repo,
 		hub:         hub,
+		presence:    presence,
 		storagePath: storagePath,
 		storageURL:  storageURL,
+	}
+}
+
+func NormalizeStatusPreference(status string) string {
+	switch status {
+	case StatusDND:
+		return StatusDND
+	case StatusOffline, "invisible":
+		return StatusOffline
+	default:
+		return StatusOnline
+	}
+}
+
+func EffectiveStatus(statusPreference string, presence string) string {
+	statusPreference = NormalizeStatusPreference(statusPreference)
+
+	if statusPreference == StatusOffline {
+		return StatusOffline
+	}
+
+	switch presence {
+	case StatusAway:
+		return StatusAway
+	case StatusOnline:
+		if statusPreference == StatusDND {
+			return StatusDND
+		}
+		return StatusOnline
+	default:
+		return StatusOffline
+	}
+}
+
+func (s *Service) currentPresence(userID uuid.UUID) string {
+	if s.presence == nil {
+		return StatusOffline
+	}
+	return s.presence.GetStatus(userID)
+}
+
+func (s *Service) decorateSelfUserStatus(user *User) {
+	if user == nil {
+		return
+	}
+
+	storedPreference := NormalizeStatusPreference(user.Status)
+	user.StatusPreference = storedPreference
+	user.Status = EffectiveStatus(storedPreference, s.currentPresence(user.ID))
+}
+
+func (s *Service) decoratePublicUserStatus(user *User) {
+	if user == nil {
+		return
+	}
+
+	storedPreference := NormalizeStatusPreference(user.Status)
+	user.Status = EffectiveStatus(storedPreference, s.currentPresence(user.ID))
+	user.StatusPreference = ""
+}
+
+func (s *Service) decoratePublicUsersStatus(users []*User) {
+	for _, user := range users {
+		s.decoratePublicUserStatus(user)
 	}
 }
 
@@ -33,11 +99,19 @@ func (s *Service) GetSelf(ctx context.Context) (*User, error) {
 	if userID == "" {
 		return nil, errors.Unauthorized("user not authenticated")
 	}
+
 	id, err := uuid.Parse(userID)
 	if err != nil {
 		return nil, errors.BadRequest("invalid user id")
 	}
-	return s.repo.GetByID(ctx, id)
+
+	user, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	s.decorateSelfUserStatus(user)
+	return user, nil
 }
 
 func (s *Service) GetUser(ctx context.Context, userID string) (*User, error) {
@@ -45,11 +119,24 @@ func (s *Service) GetUser(ctx context.Context, userID string) (*User, error) {
 	if err != nil {
 		return nil, errors.BadRequest("invalid user id")
 	}
-	return s.repo.GetByID(ctx, id)
+
+	user, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	s.decoratePublicUserStatus(user)
+	return user, nil
 }
 
 func (s *Service) GetUserByHandle(ctx context.Context, handle string) (*User, error) {
-	return s.repo.GetByHandle(ctx, handle)
+	user, err := s.repo.GetByHandle(ctx, handle)
+	if err != nil {
+		return nil, err
+	}
+
+	s.decoratePublicUserStatus(user)
+	return user, nil
 }
 
 func (s *Service) UpdateProfile(ctx context.Context, displayName, avatarURL, bio string) (*User, error) {
@@ -57,6 +144,7 @@ func (s *Service) UpdateProfile(ctx context.Context, displayName, avatarURL, bio
 	if userID == "" {
 		return nil, errors.Unauthorized("user not authenticated")
 	}
+
 	id, err := uuid.Parse(userID)
 	if err != nil {
 		return nil, errors.BadRequest("invalid user id")
@@ -81,22 +169,33 @@ func (s *Service) UpdateProfile(ctx context.Context, displayName, avatarURL, bio
 		return nil, err
 	}
 
+	user, err = s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	s.decorateSelfUserStatus(user)
+
 	if s.hub != nil {
 		friends, err := s.getFriendsList(ctx, id)
 		if err == nil {
+			publicUser := *user
+			s.decoratePublicUserStatus(&publicUser)
+
 			profileEvent := &streamv1.ServerEvent{
 				EventId:   uuid.New().String(),
 				CreatedAt: timestamppb.Now(),
 				Payload: &streamv1.ServerEvent_ProfileUpdated{
 					ProfileUpdated: &streamv1.ProfileUpdated{
 						UserId:      userID,
-						DisplayName: user.DisplayName,
-						AvatarUrl:   user.AvatarURL,
-						Status:      user.Status,
-						Bio:         user.Bio,
+						DisplayName: publicUser.DisplayName,
+						AvatarUrl:   publicUser.AvatarURL,
+						Status:      publicUser.Status,
+						Bio:         publicUser.Bio,
 					},
 				},
 			}
+
 			for _, friendID := range friends {
 				s.hub.BroadcastToUser(friendID.String(), profileEvent)
 			}
@@ -111,6 +210,7 @@ func (s *Service) UploadAvatar(ctx context.Context, imageData []byte, filename s
 	if userID == "" {
 		return nil, nil, errors.Unauthorized("user not authenticated")
 	}
+
 	id, err := uuid.Parse(userID)
 	if err != nil {
 		return nil, nil, errors.BadRequest("invalid user id")
@@ -161,21 +261,28 @@ func (s *Service) UploadAvatar(ctx context.Context, imageData []byte, filename s
 		return nil, nil, err
 	}
 
+	s.decorateSelfUserStatus(user)
+
 	if s.hub != nil {
 		friends, _ := s.getFriendsList(ctx, id)
+
+		publicUser := *user
+		s.decoratePublicUserStatus(&publicUser)
+
 		profileEvent := &streamv1.ServerEvent{
 			EventId:   uuid.New().String(),
 			CreatedAt: timestamppb.Now(),
 			Payload: &streamv1.ServerEvent_ProfileUpdated{
 				ProfileUpdated: &streamv1.ProfileUpdated{
 					UserId:      userID,
-					DisplayName: user.DisplayName,
-					AvatarUrl:   user.AvatarURL,
-					Status:      user.Status,
-					Bio:         user.Bio,
+					DisplayName: publicUser.DisplayName,
+					AvatarUrl:   publicUser.AvatarURL,
+					Status:      publicUser.Status,
+					Bio:         publicUser.Bio,
 				},
 			},
 		}
+
 		for _, fid := range friends {
 			s.hub.BroadcastToUser(fid.String(), profileEvent)
 		}
@@ -238,36 +345,47 @@ func (s *Service) UpdateStatus(ctx context.Context, status string) (*User, error
 	if userID == "" {
 		return nil, errors.Unauthorized("user not authenticated")
 	}
+
 	id, err := uuid.Parse(userID)
 	if err != nil {
 		return nil, errors.BadRequest("invalid user id")
 	}
-	if err := s.repo.UpdateStatus(ctx, id, status); err != nil {
-		return nil, err
+
+	switch status {
+	case StatusAway:
+		if s.presence != nil {
+			if err := s.presence.SetAway(ctx, id); err != nil {
+				return nil, err
+			}
+		}
+
+	case StatusOnline, StatusDND, StatusOffline, "invisible":
+		normalized := NormalizeStatusPreference(status)
+
+		if err := s.repo.UpdateStatus(ctx, id, normalized); err != nil {
+			return nil, err
+		}
+
+		if s.presence != nil {
+			if normalized != StatusOffline && s.presence.GetStatus(id) == StatusOffline {
+				if err := s.presence.SetOnline(ctx, id); err != nil {
+					return nil, err
+				}
+			} else {
+				s.presence.Refresh(ctx, id)
+			}
+		}
+
+	default:
+		return nil, errors.BadRequest("invalid status")
 	}
+
 	user, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 
-	if s.hub != nil {
-		friends, err := s.getFriendsList(ctx, id)
-		if err == nil {
-			statusEvent := &streamv1.ServerEvent{
-				EventId:   uuid.New().String(),
-				CreatedAt: timestamppb.Now(),
-				Payload: &streamv1.ServerEvent_UserStatusChanged{
-					UserStatusChanged: &streamv1.UserStatusChanged{
-						UserId: userID,
-						Status: status,
-					},
-				},
-			}
-			for _, friendID := range friends {
-				s.hub.BroadcastToUser(friendID.String(), statusEvent)
-			}
-		}
-	}
+	s.decorateSelfUserStatus(user)
 	return user, nil
 }
 
@@ -297,22 +415,27 @@ func (s *Service) SearchUsers(ctx context.Context, query string, limit int, curs
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
+
 	var offset int
 	if cursor != nil && *cursor != "" {
 		if _, err := fmt.Sscanf(*cursor, "%d", &offset); err != nil {
 			return nil, nil, errors.BadRequest("invalid cursor")
 		}
 	}
-	users, err := s.repo.Search(ctx, query, limit)
+
+	users, err := s.repo.Search(ctx, query, limit+1)
 	if err != nil {
 		return nil, nil, err
 	}
+
 	var nextCursor *string
 	if len(users) > limit {
 		users = users[:limit]
 		next := fmt.Sprintf("%d", offset+limit)
 		nextCursor = &next
 	}
+
+	s.decoratePublicUsersStatus(users)
 	return users, nextCursor, nil
 }
 
@@ -325,5 +448,12 @@ func (s *Service) ListUsersByIDs(ctx context.Context, userIDs []string) ([]*User
 		}
 		ids = append(ids, id)
 	}
-	return s.repo.ListByIDs(ctx, ids)
+
+	users, err := s.repo.ListByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+
+	s.decoratePublicUsersStatus(users)
+	return users, nil
 }

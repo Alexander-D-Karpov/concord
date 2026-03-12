@@ -3,7 +3,6 @@ package users
 import (
 	"context"
 	"sync"
-	"time"
 
 	streamv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/stream/v1"
 	"github.com/Alexander-D-Karpov/concord/internal/events"
@@ -15,121 +14,87 @@ const (
 	StatusOnline  = "online"
 	StatusAway    = "away"
 	StatusOffline = "offline"
-
-	HeartbeatInterval = 30 * time.Second
-	AwayThreshold     = 5 * time.Minute
-	OfflineThreshold  = 10 * time.Minute
+	StatusDND     = "dnd"
 )
 
 type PresenceManager struct {
 	mu           sync.RWMutex
-	lastActivity map[uuid.UUID]time.Time
 	currentState map[uuid.UUID]string
 	repo         *Repository
 	hub          *events.Hub
-	stopCh       chan struct{}
 }
 
 func NewPresenceManager(repo *Repository, hub *events.Hub) *PresenceManager {
-	pm := &PresenceManager{
-		lastActivity: make(map[uuid.UUID]time.Time),
+	return &PresenceManager{
 		currentState: make(map[uuid.UUID]string),
 		repo:         repo,
 		hub:          hub,
-		stopCh:       make(chan struct{}),
 	}
-	go pm.runChecker()
-	return pm
 }
 
 func (pm *PresenceManager) Heartbeat(ctx context.Context, userID uuid.UUID) error {
+	return pm.SetOnline(ctx, userID)
+}
+
+func (pm *PresenceManager) SetOnline(ctx context.Context, userID uuid.UUID) error {
 	pm.mu.Lock()
-	pm.lastActivity[userID] = time.Now()
 	oldState := pm.currentState[userID]
 	pm.currentState[userID] = StatusOnline
 	pm.mu.Unlock()
 
 	if oldState != StatusOnline {
-		if err := pm.repo.UpdateStatus(ctx, userID, StatusOnline); err != nil {
-			return err
-		}
-		pm.broadcastStatusChange(ctx, userID, StatusOnline)
+		pm.broadcastCurrentStatus(ctx, userID)
 	}
+	return nil
+}
 
+func (pm *PresenceManager) SetAway(ctx context.Context, userID uuid.UUID) error {
+	pm.mu.Lock()
+	oldState := pm.currentState[userID]
+	pm.currentState[userID] = StatusAway
+	pm.mu.Unlock()
+
+	if oldState != StatusAway {
+		pm.broadcastCurrentStatus(ctx, userID)
+	}
 	return nil
 }
 
 func (pm *PresenceManager) SetOffline(ctx context.Context, userID uuid.UUID) error {
 	pm.mu.Lock()
-	delete(pm.lastActivity, userID)
+	oldState := pm.currentState[userID]
 	pm.currentState[userID] = StatusOffline
 	pm.mu.Unlock()
 
-	if err := pm.repo.UpdateStatus(ctx, userID, StatusOffline); err != nil {
-		return err
+	if oldState != StatusOffline {
+		pm.broadcastCurrentStatus(ctx, userID)
 	}
-	pm.broadcastStatusChange(ctx, userID, StatusOffline)
 	return nil
 }
 
-func (pm *PresenceManager) runChecker() {
-	ticker := time.NewTicker(HeartbeatInterval)
-	defer ticker.Stop()
+func (pm *PresenceManager) Stop() {}
 
-	for {
-		select {
-		case <-ticker.C:
-			pm.checkPresence()
-		case <-pm.stopCh:
-			return
-		}
+func (pm *PresenceManager) GetStatus(userID uuid.UUID) string {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	if s, ok := pm.currentState[userID]; ok {
+		return s
 	}
+	return StatusOffline
 }
 
-func (pm *PresenceManager) checkPresence() {
-	now := time.Now()
-	ctx := context.Background()
-
-	pm.mu.Lock()
-	var updates []struct {
-		userID   uuid.UUID
-		newState string
-	}
-
-	for userID, lastActive := range pm.lastActivity {
-		idle := now.Sub(lastActive)
-		currentState := pm.currentState[userID]
-		var newState string
-
-		if idle > OfflineThreshold {
-			newState = StatusOffline
-			delete(pm.lastActivity, userID)
-		} else if idle > AwayThreshold {
-			newState = StatusAway
-		} else {
-			newState = StatusOnline
-		}
-
-		if newState != currentState {
-			pm.currentState[userID] = newState
-			updates = append(updates, struct {
-				userID   uuid.UUID
-				newState string
-			}{userID, newState})
-		}
-	}
-	pm.mu.Unlock()
-
-	for _, update := range updates {
-		_ = pm.repo.UpdateStatus(ctx, update.userID, update.newState)
-		pm.broadcastStatusChange(ctx, update.userID, update.newState)
-	}
-}
-
-func (pm *PresenceManager) broadcastStatusChange(ctx context.Context, userID uuid.UUID, status string) {
+func (pm *PresenceManager) broadcastCurrentStatus(ctx context.Context, userID uuid.UUID) {
 	if pm.hub == nil {
 		return
 	}
+
+	statusPreference, err := pm.repo.GetStatusPreference(ctx, userID)
+	if err != nil {
+		statusPreference = StatusOnline
+	}
+
+	effective := EffectiveStatus(statusPreference, pm.GetStatus(userID))
 
 	event := &streamv1.ServerEvent{
 		EventId:   uuid.New().String(),
@@ -137,7 +102,7 @@ func (pm *PresenceManager) broadcastStatusChange(ctx context.Context, userID uui
 		Payload: &streamv1.ServerEvent_UserStatusChanged{
 			UserStatusChanged: &streamv1.UserStatusChanged{
 				UserId: userID.String(),
-				Status: status,
+				Status: effective,
 			},
 		},
 	}
@@ -182,15 +147,6 @@ func (pm *PresenceManager) getFriendsList(ctx context.Context, userID uuid.UUID)
 	return friends, rows.Err()
 }
 
-func (pm *PresenceManager) Stop() {
-	close(pm.stopCh)
-}
-
-func (pm *PresenceManager) GetStatus(userID uuid.UUID) string {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-	if s, ok := pm.currentState[userID]; ok {
-		return s
-	}
-	return StatusOffline
+func (pm *PresenceManager) Refresh(ctx context.Context, userID uuid.UUID) {
+	pm.broadcastCurrentStatus(ctx, userID)
 }

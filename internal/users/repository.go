@@ -25,6 +25,7 @@ type User struct {
 	OAuthSubject       *string
 	CreatedAt          time.Time
 	DeletedAt          *time.Time
+	StatusPreference   string
 }
 
 type UserAvatar struct {
@@ -466,4 +467,25 @@ func (r *Repository) GetLatestUserAvatar(ctx context.Context, userID uuid.UUID) 
 		return nil, nil
 	}
 	return av, err
+}
+
+func (r *Repository) GetStatusPreference(ctx context.Context, userID uuid.UUID) (string, error) {
+	var status string
+
+	err := r.pool.QueryRow(ctx,
+		`SELECT COALESCE(status, 'online') FROM users WHERE id = $1`,
+		userID,
+	).Scan(&status)
+	if err != nil {
+		return "", err
+	}
+
+	switch status {
+	case StatusDND:
+		return StatusDND, nil
+	case StatusOffline:
+		return StatusOffline, nil
+	default:
+		return StatusOnline, nil
+	}
 }

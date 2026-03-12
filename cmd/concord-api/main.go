@@ -117,10 +117,6 @@ func run() error {
 	}
 	logger.Info("migrations applied successfully")
 
-	if _, err := database.Pool.Exec(ctx, `UPDATE users SET status = 'offline'`); err != nil {
-		logger.Warn("failed to reset user statuses", zap.Error(err))
-	}
-
 	var cacheClient *cache.Cache
 	if cfg.Redis.Enabled {
 		cacheClient, err = cache.New(
@@ -194,9 +190,13 @@ func run() error {
 	if cacheClient != nil {
 		usersRepo = users.NewRepositoryWithCache(database.Pool, cacheClient)
 	}
+
 	eventsHub := events.NewHub(logger, database.Pool, aside)
 
-	usersService := users.NewService(usersRepo, eventsHub, cfg.Storage.Path, cfg.Storage.URL)
+	presenceManager := users.NewPresenceManager(usersRepo, eventsHub)
+	defer presenceManager.Stop()
+
+	usersService := users.NewService(usersRepo, eventsHub, presenceManager, cfg.Storage.Path, cfg.Storage.URL)
 	usersHandler := users.NewHandler(usersService)
 
 	roomsRepo := rooms.NewRepository(database.Pool)
@@ -219,9 +219,6 @@ func run() error {
 	membershipService := membership.NewService(roomsRepo, eventsHub, aside)
 	membershipHandler := membership.NewHandler(membershipService)
 
-	presenceManager := users.NewPresenceManager(usersRepo, eventsHub)
-	defer presenceManager.Stop()
-
 	streamHandler := stream.NewHandler(eventsHub, presenceManager)
 
 	voiceAssignService := voiceassign.NewService(database.Pool, jwtManager, cacheClient)
@@ -233,7 +230,7 @@ func run() error {
 	if cacheClient != nil {
 		friendsRepo = friends.NewRepositoryWithCache(database.Pool, cacheClient)
 	}
-	friendsService := friends.NewService(friendsRepo, eventsHub, usersRepo)
+	friendsService := friends.NewService(friendsRepo, eventsHub, usersRepo, presenceManager)
 	friendsHandler := friends.NewHandler(friendsService)
 
 	adminService := admin.NewService(database.Pool, roomsRepo, eventsHub, logger)
@@ -241,7 +238,7 @@ func run() error {
 
 	dmRepo := dm.NewRepository(database.Pool)
 	dmMsgRepo := dm.NewMessageRepository(database.Pool, snowflakeGen)
-	dmService := dm.NewService(dmRepo, dmMsgRepo, usersRepo, eventsHub, voiceAssignService, logger)
+	dmService := dm.NewService(dmRepo, dmMsgRepo, usersRepo, eventsHub, voiceAssignService, presenceManager, logger)
 	dmHandler := dm.NewHandler(dmService, storageService)
 	dmHandler.SetReadTrackingService(readTrackingSvc)
 	dmHandler.SetTypingService(typingSvc)
