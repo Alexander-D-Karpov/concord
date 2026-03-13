@@ -2,12 +2,15 @@ package ratelimit
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Alexander-D-Karpov/concord/internal/infra/cache"
 	"golang.org/x/time/rate"
+	"google.golang.org/grpc/metadata"
 )
 
 type Limiter struct {
@@ -17,6 +20,8 @@ type Limiter struct {
 	localCache  map[string]*rate.Limiter
 	mu          sync.RWMutex
 	cleanupDone chan struct{}
+
+	bypassToken string
 }
 
 type LimitConfig struct {
@@ -24,10 +29,11 @@ type LimitConfig struct {
 	Burst             int
 }
 
-func NewLimiter(cache *cache.Cache, requestsPerMinute, burst int, enabled bool) *Limiter {
+func NewLimiter(cache *cache.Cache, requestsPerMinute, burst int, enabled bool, bypassToken string) *Limiter {
 	l := &Limiter{
-		cache:   cache,
-		enabled: enabled,
+		cache:       cache,
+		enabled:     enabled,
+		bypassToken: strings.TrimSpace(bypassToken),
 		limits: map[string]LimitConfig{
 			"default": {
 				RequestsPerMinute: requestsPerMinute,
@@ -55,6 +61,30 @@ func NewLimiter(cache *cache.Cache, requestsPerMinute, burst int, enabled bool) 
 	}
 
 	return l
+}
+
+func (l *Limiter) ShouldBypass(ctx context.Context) bool {
+	if l.bypassToken == "" {
+		return false
+	}
+
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return false
+	}
+
+	values := md.Get(BypassMetadataKey)
+	if len(values) == 0 {
+		return false
+	}
+
+	for _, candidate := range values {
+		if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(candidate)), []byte(l.bypassToken)) == 1 {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (l *Limiter) Allow(ctx context.Context, key string) (bool, error) {

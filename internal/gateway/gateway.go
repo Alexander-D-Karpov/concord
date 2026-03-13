@@ -124,7 +124,7 @@ func (g *Gateway) Start(ctx context.Context, port int) error {
 
 func customMatcher(key string) (string, bool) {
 	switch key {
-	case "authorization", "x-request-id", "x-correlation-id", "grpc-timeout":
+	case "authorization", "x-request-id", "x-correlation-id", "grpc-timeout", "x-concord-ratelimit-bypass":
 		return key, true
 	default:
 		return runtime.DefaultHeaderMatcher(key)

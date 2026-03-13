@@ -39,7 +39,7 @@ func NewHandler(
 	}
 }
 
-func (h *Handler) HandlePacket(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {
+func (h *Handler) handlePacket(data []byte, owner router.PacketOwner, addr *net.UDPAddr, conn *net.UDPConn) {
 	if len(data) < 1 {
 		return
 	}
@@ -52,7 +52,7 @@ func (h *Handler) HandlePacket(data []byte, addr *net.UDPAddr, conn *net.UDPConn
 	case protocol.PacketTypeHello:
 		h.handleHello(data, addr, conn)
 	case protocol.PacketTypeAudio, protocol.PacketTypeVideo:
-		h.handleMedia(data, addr, conn)
+		h.handleMedia(data, owner, addr, conn)
 	case protocol.PacketTypePing:
 		h.handlePing(data, addr, conn)
 	case protocol.PacketTypeBye:
@@ -74,25 +74,45 @@ func (h *Handler) HandlePacket(data []byte, addr *net.UDPAddr, conn *net.UDPConn
 	}
 }
 
-func (h *Handler) handleMedia(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {
+func (h *Handler) HandlePacket(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {
+	h.handlePacket(data, nil, addr, conn)
+}
+
+func (h *Handler) HandlePacketOwned(data []byte, owner router.PacketOwner, addr *net.UDPAddr, conn *net.UDPConn) {
+	h.handlePacket(data, owner, addr, conn)
+}
+
+func (h *Handler) handleMedia(data []byte, owner router.PacketOwner, addr *net.UDPAddr, conn *net.UDPConn) {
 	if len(data) < protocol.MediaHeaderSize {
 		return
 	}
 
-	pkt, err := protocol.ParsePacket(data)
+	hdr, err := protocol.ParseMediaHeader(data)
 	if err != nil {
 		return
 	}
 
-	sess := h.sessionManager.GetBySSRC(pkt.Header.SSRC)
+	sess := h.sessionManager.GetBySSRC(hdr.SSRC)
 	if sess == nil {
 		return
 	}
 
-	h.sessionManager.BindAddr(sess.ID, addr)
+	if sess.AddrChanged(addr) {
+		h.sessionManager.BindAddr(sess.ID, addr)
+	}
 	h.sessionManager.Touch(sess.ID)
-	sess.StoreForRetransmit(pkt.Header.SSRC, pkt.Header.Sequence, data)
-	h.router.RouteMediaRaw(pkt.Header, data, addr, conn)
+
+	// Store retransmit only for video.
+	// Audio is high-rate and usually not worth the copy + map churn.
+	if hdr.Type == protocol.PacketTypeVideo {
+		sess.StoreForRetransmit(hdr.SSRC, hdr.Sequence, data)
+	}
+
+	if owner != nil {
+		h.router.RouteMediaOwned(*hdr, data, owner, addr, conn)
+	} else {
+		h.router.RouteMediaRaw(*hdr, data, addr, conn)
+	}
 }
 
 func (h *Handler) handleHello(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {

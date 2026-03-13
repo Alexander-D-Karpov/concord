@@ -2,39 +2,68 @@ package router
 
 import (
 	"net"
+	"runtime"
 	"sync"
 
 	"github.com/Alexander-D-Karpov/concord/internal/voice/protocol"
 	"github.com/Alexander-D-Karpov/concord/internal/voice/session"
+	"github.com/Alexander-D-Karpov/concord/internal/voice/telemetry"
 	"go.uber.org/zap"
 )
+
+// PacketOwner is implemented by the UDP packet buffer.
+// Router does not need to know the concrete type.
+type PacketOwner interface {
+	Retain()
+	Release()
+}
 
 type Router struct {
 	sessionManager *session.Manager
 	logger         *zap.Logger
-	sendQueue      chan *sendTask
+	metrics        *telemetry.Metrics
+	sendQueues     []chan *sendTask
 	wg             sync.WaitGroup
 	stopChan       chan struct{}
+	numWorkers     int
+
+	sendTaskPool sync.Pool
 }
 
 type sendTask struct {
-	data []byte
-	addr *net.UDPAddr
-	conn *net.UDPConn
+	data  []byte
+	owner PacketOwner
+	addr  *net.UDPAddr
+	conn  *net.UDPConn
 }
 
-func NewRouter(sessionManager *session.Manager, logger *zap.Logger) *Router {
+func NewRouter(sessionManager *session.Manager, logger *zap.Logger, metrics *telemetry.Metrics) *Router {
+	workers := runtime.NumCPU() * 2
+	if workers < 4 {
+		workers = 4
+	}
+	if workers > 32 {
+		workers = 32
+	}
+
 	r := &Router{
 		sessionManager: sessionManager,
 		logger:         logger,
-		sendQueue:      make(chan *sendTask, 10000),
+		metrics:        metrics,
+		sendQueues:     make([]chan *sendTask, workers),
 		stopChan:       make(chan struct{}),
+		numWorkers:     workers,
+		sendTaskPool: sync.Pool{
+			New: func() interface{} {
+				return new(sendTask)
+			},
+		},
 	}
 
-	numWorkers := 4
-	for i := 0; i < numWorkers; i++ {
+	for i := 0; i < workers; i++ {
+		r.sendQueues[i] = make(chan *sendTask, 8192)
 		r.wg.Add(1)
-		go r.sendWorker()
+		go r.sendWorker(r.sendQueues[i])
 	}
 
 	return r
@@ -42,179 +71,82 @@ func NewRouter(sessionManager *session.Manager, logger *zap.Logger) *Router {
 
 func (r *Router) Stop() {
 	close(r.stopChan)
+	for _, q := range r.sendQueues {
+		close(q)
+	}
 	r.wg.Wait()
 }
 
-func (r *Router) RoutePacket(packet *protocol.Packet, fromAddr *net.UDPAddr, conn *net.UDPConn) {
-	pktType := packet.Header.Type
+func (r *Router) getSendTask(data []byte, owner PacketOwner, addr *net.UDPAddr, conn *net.UDPConn) *sendTask {
+	t := r.sendTaskPool.Get().(*sendTask)
+	t.data = data
+	t.owner = owner
+	t.addr = addr
+	t.conn = conn
+	return t
+}
 
-	switch pktType {
-	case protocol.PacketTypeAudio, protocol.PacketTypeVideo:
-		sess := r.sessionManager.GetByAddr(fromAddr)
-		if sess == nil {
-			r.logger.Debug("unknown sender session", zap.String("from", fromAddr.String()))
-			return
-		}
-
-		roomID := sess.RoomID
-		if roomID == "" {
-			r.logger.Debug("sender session missing room id", zap.Uint32("ssrc", sess.SSRC))
-			return
-		}
-
-		sessions := r.sessionManager.GetRoomSessions(roomID)
-		if len(sessions) == 0 {
-			r.logger.Debug("no sessions in room", zap.String("room_id", roomID))
-			return
-		}
-
-		data := packet.Marshal()
-		r.routeMediaPacket(data, packet, fromAddr, conn, sessions)
-		return
-
-	case protocol.PacketTypeSpeaking:
-		roomID := packet.GetRoomIDString()
-		if roomID == "" {
-			r.logger.Debug("speaking packet missing room id")
-			return
-		}
-
-		sessions := r.sessionManager.GetRoomSessions(roomID)
-		if len(sessions) == 0 {
-			r.logger.Debug("no sessions in room", zap.String("room_id", roomID))
-			return
-		}
-
-		data := packet.Marshal()
-		r.routeSpeakingPacket(data, fromAddr, conn, sessions)
+func (r *Router) putSendTask(t *sendTask) {
+	if t == nil {
 		return
 	}
+	t.data = nil
+	t.owner = nil
+	t.addr = nil
+	t.conn = nil
+	r.sendTaskPool.Put(t)
 }
 
-func sameUDPAddr(a, b *net.UDPAddr) bool {
-	if a == nil || b == nil {
+func (r *Router) enqueue(queueIdx int, data []byte, owner PacketOwner, addr *net.UDPAddr, conn *net.UDPConn) bool {
+	if owner != nil {
+		owner.Retain()
+	}
+
+	task := r.getSendTask(data, owner, addr, conn)
+
+	select {
+	case r.sendQueues[queueIdx] <- task:
+		return true
+	default:
+		if owner != nil {
+			owner.Release()
+		}
+		r.putSendTask(task)
+		if r.metrics != nil {
+			r.metrics.RecordPacketDropped()
+		}
 		return false
-	}
-	if a.Port != b.Port {
-		return false
-	}
-	if a.IP == nil || b.IP == nil {
-		return a.String() == b.String()
-	}
-	return a.IP.Equal(b.IP)
-}
-
-func (r *Router) routeMediaPacket(
-	data []byte,
-	packet *protocol.Packet,
-	fromAddr *net.UDPAddr,
-	conn *net.UDPConn,
-	sessions []*session.Session,
-) {
-	for _, sess := range sessions {
-		to := sess.GetAddr()
-		if to == nil {
-			continue
-		}
-
-		if sameUDPAddr(to, fromAddr) {
-			continue
-		}
-
-		select {
-		case r.sendQueue <- &sendTask{
-			data: data,
-			addr: to,
-			conn: conn,
-		}:
-		default:
-			r.logger.Warn("send queue full, dropping packet",
-				zap.Uint32("ssrc", sess.SSRC),
-			)
-		}
-	}
-}
-
-func (r *Router) routeSpeakingPacket(
-	data []byte,
-	fromAddr *net.UDPAddr,
-	conn *net.UDPConn,
-	sessions []*session.Session,
-) {
-	for _, sess := range sessions {
-		to := sess.GetAddr()
-		if to == nil {
-			continue
-		}
-
-		if sameUDPAddr(to, fromAddr) {
-			continue
-		}
-
-		select {
-		case r.sendQueue <- &sendTask{
-			data: data,
-			addr: to,
-			conn: conn,
-		}:
-		default:
-			r.logger.Warn("send queue full, dropping speaking packet",
-				zap.Uint32("ssrc", sess.SSRC),
-			)
-		}
-	}
-}
-
-func (r *Router) sendWorker() {
-	defer r.wg.Done()
-
-	for {
-		select {
-		case task, ok := <-r.sendQueue:
-			if !ok {
-				return
-			}
-			if task == nil || task.conn == nil || task.addr == nil {
-				continue
-			}
-
-			if _, err := task.conn.WriteToUDP(task.data, task.addr); err != nil {
-				r.logger.Debug("failed to send packet",
-					zap.String("to", task.addr.String()),
-					zap.Error(err),
-				)
-			}
-
-		case <-r.stopChan:
-			return
-		}
 	}
 }
 
 func (r *Router) RouteMediaRaw(h protocol.MediaHeader, raw []byte, fromAddr *net.UDPAddr, conn *net.UDPConn) {
+	r.routeMedia(h, raw, nil, fromAddr, conn)
+}
+
+func (r *Router) RouteMediaOwned(h protocol.MediaHeader, raw []byte, owner PacketOwner, fromAddr *net.UDPAddr, conn *net.UDPConn) {
+	r.routeMedia(h, raw, owner, fromAddr, conn)
+}
+
+func (r *Router) routeMedia(h protocol.MediaHeader, raw []byte, owner PacketOwner, fromAddr *net.UDPAddr, conn *net.UDPConn) {
 	sender := r.sessionManager.GetBySSRC(h.SSRC)
 	if sender == nil {
-		r.logger.Debug("unknown sender SSRC", zap.Uint32("ssrc", h.SSRC))
+		return
+	}
+	roomID := sender.RoomID
+	if roomID == "" {
 		return
 	}
 
-	roomID := sender.RoomID
-	if roomID == "" {
-		r.logger.Debug("sender missing room id", zap.Uint32("ssrc", sender.SSRC))
+	if h.Type == protocol.PacketTypeAudio && sender.Muted {
 		return
 	}
 
 	sessions := r.sessionManager.GetRoomSessions(roomID)
-	if len(sessions) == 0 {
-		r.logger.Debug("no sessions in room", zap.String("room_id", roomID))
-		return
-	}
-
-	pktType := h.Type
-	routedCount := 0
+	senderID := sender.ID
+	routed := 0
 
 	for _, dst := range sessions {
-		if dst.ID == sender.ID {
+		if dst == nil || dst.ID == senderID {
 			continue
 		}
 
@@ -223,32 +155,61 @@ func (r *Router) RouteMediaRaw(h protocol.MediaHeader, raw []byte, fromAddr *net
 			continue
 		}
 
-		// Skip if sender is muted (for audio)
-		if pktType == protocol.PacketTypeAudio && sender.Muted {
-			continue
-		}
-
-		// Check subscription - if dst has explicit subscriptions, filter
 		if !dst.IsSubscribedTo(h.SSRC) {
 			continue
 		}
 
-		select {
-		case r.sendQueue <- &sendTask{data: raw, addr: to, conn: conn}:
-			routedCount++
-		default:
-			r.logger.Warn("send queue full, dropping packet",
-				zap.Uint32("ssrc", h.SSRC),
-				zap.String("to", to.String()),
-			)
+		qi := int(dst.ID) % r.numWorkers
+		if r.enqueue(qi, raw, owner, to, conn) {
+			routed++
 		}
 	}
 
-	if routedCount > 0 && h.Sequence%1000 == 0 {
-		r.logger.Debug("routed media packet",
-			zap.Uint32("ssrc", h.SSRC),
-			zap.Uint8("type", pktType),
-			zap.Int("recipients", routedCount),
-		)
+	if r.metrics != nil && routed > 0 {
+		if h.Type == protocol.PacketTypeAudio {
+			r.metrics.RecordAudioOutN(uint64(routed))
+		} else {
+			r.metrics.RecordVideoOutN(uint64(routed))
+		}
+		r.metrics.RecordRoomRouted(roomID, uint64(len(raw)*routed))
+	}
+}
+
+func (r *Router) RouteControlRaw(raw []byte, fromAddr *net.UDPAddr, conn *net.UDPConn, roomID string, excludeSSRC uint32) {
+	for _, dst := range r.sessionManager.GetRoomSessions(roomID) {
+		if dst == nil || dst.SSRC == excludeSSRC {
+			continue
+		}
+
+		to := dst.GetAddr()
+		if to == nil {
+			continue
+		}
+
+		qi := int(dst.ID) % r.numWorkers
+		_ = r.enqueue(qi, raw, nil, to, conn)
+	}
+}
+
+func (r *Router) sendWorker(queue chan *sendTask) {
+	defer r.wg.Done()
+
+	for task := range queue {
+		if task == nil {
+			continue
+		}
+
+		if task.conn != nil && task.addr != nil && len(task.data) > 0 {
+			if _, err := task.conn.WriteToUDP(task.data, task.addr); err != nil {
+				r.logger.Debug("send fail", zap.String("to", task.addr.String()), zap.Error(err))
+			} else if r.metrics != nil {
+				r.metrics.RecordPacketSent(uint64(len(task.data)))
+			}
+		}
+
+		if task.owner != nil {
+			task.owner.Release()
+		}
+		r.putSendTask(task)
 	}
 }

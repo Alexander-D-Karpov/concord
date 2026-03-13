@@ -171,10 +171,11 @@ func run() error {
 			cfg.RateLimit.RequestsPerMinute,
 			cfg.RateLimit.Burst,
 			true,
+			cfg.RateLimit.BypassToken,
 		)
 		logger.Info("rate limiting enabled")
 	} else {
-		rateLimiter = ratelimit.NewLimiter(nil, 500, 100, false)
+		rateLimiter = ratelimit.NewLimiter(nil, 500, 100, false, cfg.RateLimit.BypassToken)
 	}
 	rateLimitInterceptor := ratelimit.NewInterceptor(rateLimiter)
 

@@ -279,10 +279,11 @@ type ReceiverReport struct {
 }
 
 type ParticipantLeftPayload struct {
-	UserID    string `json:"user_id"`
-	RoomID    string `json:"room_id"`
-	SSRC      uint32 `json:"ssrc"`
-	VideoSSRC uint32 `json:"video_ssrc,omitempty"`
+	UserID     string `json:"user_id"`
+	RoomID     string `json:"room_id"`
+	SSRC       uint32 `json:"ssrc"`
+	VideoSSRC  uint32 `json:"video_ssrc,omitempty"`
+	ScreenSSRC uint32 `json:"screen_ssrc,omitempty"`
 }
 
 type SubscribePayload struct {

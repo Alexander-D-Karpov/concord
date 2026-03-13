@@ -3,6 +3,7 @@ package session
 import (
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Alexander-D-Karpov/concord/internal/voice/crypto"
@@ -38,10 +39,38 @@ type Session struct {
 	retransmitBufs map[uint32]*RetransmitBuffer
 }
 
+func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
+	if addr == nil {
+		return nil
+	}
+	cp := *addr
+	if addr.IP != nil {
+		cp.IP = append(net.IP(nil), addr.IP...)
+	}
+	return &cp
+}
+
+func udpAddrEqual(a, b *net.UDPAddr) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	}
+	return a.Port == b.Port && a.Zone == b.Zone && a.IP.Equal(b.IP)
+}
+
+func udpAddrKey(addr *net.UDPAddr) string {
+	if addr == nil {
+		return ""
+	}
+	return addr.String()
+}
+
 func (s *Session) GetAddr() *net.UDPAddr {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.addr
+	return cloneUDPAddr(s.addr)
 }
 
 func (s *Session) LastActivity() time.Time {
@@ -52,6 +81,26 @@ func (s *Session) LastActivity() time.Time {
 
 func (s *Session) touchLocked(now time.Time) {
 	s.lastActivity = now
+}
+
+func (s *Session) AddrChanged(addr *net.UDPAddr) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return !udpAddrEqual(s.addr, addr)
+}
+
+func (s *Session) replaceAddr(addr *net.UDPAddr) (oldKey, newKey string, changed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if udpAddrEqual(s.addr, addr) {
+		return "", "", false
+	}
+
+	oldKey = udpAddrKey(s.addr)
+	s.addr = cloneUDPAddr(addr)
+	newKey = udpAddrKey(s.addr)
+	return oldKey, newKey, true
 }
 
 func (s *Session) SetMuted(muted bool) {
@@ -171,14 +220,46 @@ func (rb *RetransmitBuffer) Get(seq uint16) []byte {
 	return nil
 }
 
+// roomEntry keeps a mutable session map and an immutable snapshot slice.
+// Writers rebuild the snapshot only on join/leave.
+// Readers just load the snapshot with zero allocation.
+type roomEntry struct {
+	sessions map[uint32]*Session
+	snapshot atomic.Value // stores []*Session
+}
+
+func newRoomEntry() *roomEntry {
+	r := &roomEntry{
+		sessions: make(map[uint32]*Session),
+	}
+	r.snapshot.Store([]*Session(nil))
+	return r
+}
+
+func (r *roomEntry) rebuildSnapshotLocked() {
+	snap := make([]*Session, 0, len(r.sessions))
+	for _, s := range r.sessions {
+		snap = append(snap, s)
+	}
+	r.snapshot.Store(snap)
+}
+
+func (r *roomEntry) Snapshot() []*Session {
+	v := r.snapshot.Load()
+	if v == nil {
+		return nil
+	}
+	return v.([]*Session)
+}
+
 type Manager struct {
 	mu sync.RWMutex
 
-	sessions map[uint32]*Session            // sessionID -> session
-	userRoom map[string]*Session            // "user:room" -> session
-	roomMap  map[string]map[uint32]*Session // roomID -> sessionID -> session
-	ssrcMap  map[uint32]*Session            // SSRC -> session
-	addrMap  map[string]*Session            // "ip:port" -> session
+	sessions map[uint32]*Session // sessionID -> session
+	userRoom map[string]*Session // "user:room" -> session
+	roomMap  map[string]*roomEntry
+	ssrcMap  map[uint32]*Session // SSRC -> session
+	addrMap  map[string]*Session // "ip:port" -> session
 
 	nextID   uint32
 	nextSSRC uint32
@@ -188,14 +269,13 @@ func NewManager() *Manager {
 	return &Manager{
 		sessions: make(map[uint32]*Session),
 		userRoom: make(map[string]*Session),
-		roomMap:  make(map[string]map[uint32]*Session),
+		roomMap:  make(map[string]*roomEntry),
 		ssrcMap:  make(map[uint32]*Session),
 		addrMap:  make(map[string]*Session),
 		nextID:   1000,
 		nextSSRC: 2000,
 	}
 }
-
 func userRoomKey(userID, roomID string) string { return userID + ":" + roomID }
 
 func (m *Manager) CreateSession(
@@ -215,7 +295,6 @@ func (m *Manager) CreateSession(
 	audioSSRC := m.nextSSRC
 	m.nextSSRC++
 
-	// Always allocate video/screen SSRCs to allow toggling mid-call without re-handshake
 	videoSSRC := m.nextSSRC
 	m.nextSSRC++
 
@@ -229,7 +308,7 @@ func (m *Manager) CreateSession(
 		SSRC:           audioSSRC,
 		VideoSSRC:      videoSSRC,
 		ScreenSSRC:     screenSSRC,
-		addr:           addr,
+		addr:           cloneUDPAddr(addr),
 		lastActivity:   now,
 		Crypto:         sessionCrypto,
 		Muted:          false,
@@ -242,22 +321,20 @@ func (m *Manager) CreateSession(
 	m.sessions[sessionID] = sess
 	m.userRoom[userRoomKey(userID, roomID)] = sess
 
-	if m.roomMap[roomID] == nil {
-		m.roomMap[roomID] = make(map[uint32]*Session)
+	room := m.roomMap[roomID]
+	if room == nil {
+		room = newRoomEntry()
+		m.roomMap[roomID] = room
 	}
-	m.roomMap[roomID][sessionID] = sess
+	room.sessions[sessionID] = sess
+	room.rebuildSnapshotLocked()
 
 	m.ssrcMap[audioSSRC] = sess
-	if videoSSRC != 0 {
-		m.ssrcMap[videoSSRC] = sess
-	}
+	m.ssrcMap[videoSSRC] = sess
+	m.ssrcMap[screenSSRC] = sess
 
-	if screenSSRC != 0 {
-		m.ssrcMap[screenSSRC] = sess
-	}
-
-	if addr != nil {
-		m.addrMap[addr.String()] = sess
+	if sess.addr != nil {
+		m.addrMap[udpAddrKey(sess.addr)] = sess
 	}
 
 	return sess
@@ -276,18 +353,17 @@ func (m *Manager) BindAddr(sessionID uint32, addr *net.UDPAddr) {
 		return
 	}
 
-	old := sess.GetAddr()
-	if old != nil {
-		delete(m.addrMap, old.String())
+	oldKey, newKey, changed := sess.replaceAddr(addr)
+	if !changed {
+		return
 	}
 
-	now := time.Now()
-	sess.mu.Lock()
-	sess.addr = addr
-	sess.touchLocked(now)
-	sess.mu.Unlock()
-
-	m.addrMap[addr.String()] = sess
+	if oldKey != "" {
+		delete(m.addrMap, oldKey)
+	}
+	if newKey != "" {
+		m.addrMap[newKey] = sess
+	}
 }
 
 func (m *Manager) Touch(sessionID uint32) {
@@ -297,6 +373,7 @@ func (m *Manager) Touch(sessionID uint32) {
 	if sess == nil {
 		return
 	}
+
 	now := time.Now()
 	sess.mu.Lock()
 	sess.touchLocked(now)
@@ -321,7 +398,7 @@ func (m *Manager) GetByAddr(addr *net.UDPAddr) *Session {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.addrMap[addr.String()]
+	return m.addrMap[udpAddrKey(addr)]
 }
 
 func (m *Manager) GetSessionByUserInRoom(userID, roomID string) *Session {
@@ -330,16 +407,16 @@ func (m *Manager) GetSessionByUserInRoom(userID, roomID string) *Session {
 	return m.userRoom[userRoomKey(userID, roomID)]
 }
 
+// Hot-path read: no slice allocation.
 func (m *Manager) GetRoomSessions(roomID string) []*Session {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	room := m.roomMap[roomID]
+	m.mu.RUnlock()
 
-	roomSessions := m.roomMap[roomID]
-	out := make([]*Session, 0, len(roomSessions))
-	for _, s := range roomSessions {
-		out = append(out, s)
+	if room == nil {
+		return nil
 	}
-	return out
+	return room.Snapshot()
 }
 
 func (m *Manager) RemoveSession(sessionID uint32) {
@@ -355,21 +432,19 @@ func (m *Manager) RemoveSession(sessionID uint32) {
 	delete(m.userRoom, userRoomKey(sess.UserID, sess.RoomID))
 
 	delete(m.ssrcMap, sess.SSRC)
-	if sess.VideoSSRC != 0 {
-		delete(m.ssrcMap, sess.VideoSSRC)
-	}
-	if sess.ScreenSSRC != 0 {
-		delete(m.ssrcMap, sess.ScreenSSRC)
+	delete(m.ssrcMap, sess.VideoSSRC)
+	delete(m.ssrcMap, sess.ScreenSSRC)
+
+	if sess.addr != nil {
+		delete(m.addrMap, udpAddrKey(sess.addr))
 	}
 
-	if a := sess.GetAddr(); a != nil {
-		delete(m.addrMap, a.String())
-	}
-
-	if roomSessions, ok := m.roomMap[sess.RoomID]; ok {
-		delete(roomSessions, sessionID)
-		if len(roomSessions) == 0 {
+	if room := m.roomMap[sess.RoomID]; room != nil {
+		delete(room.sessions, sessionID)
+		if len(room.sessions) == 0 {
 			delete(m.roomMap, sess.RoomID)
+		} else {
+			room.rebuildSnapshotLocked()
 		}
 	}
 }
@@ -380,9 +455,9 @@ func (m *Manager) CleanupInactive(timeout time.Duration) []uint32 {
 
 	now := time.Now()
 	var removed []uint32
+	touchedRooms := make(map[string]*roomEntry)
 
 	for sessionID, sess := range m.sessions {
-		// session has its own lock for lastActivity
 		last := sess.LastActivity()
 		if now.Sub(last) <= timeout {
 			continue
@@ -394,23 +469,25 @@ func (m *Manager) CleanupInactive(timeout time.Duration) []uint32 {
 		delete(m.userRoom, userRoomKey(sess.UserID, sess.RoomID))
 
 		delete(m.ssrcMap, sess.SSRC)
-		if sess.VideoSSRC != 0 {
-			delete(m.ssrcMap, sess.VideoSSRC)
-		}
-		if sess.ScreenSSRC != 0 {
-			delete(m.ssrcMap, sess.ScreenSSRC)
+		delete(m.ssrcMap, sess.VideoSSRC)
+		delete(m.ssrcMap, sess.ScreenSSRC)
+
+		if sess.addr != nil {
+			delete(m.addrMap, udpAddrKey(sess.addr))
 		}
 
-		if a := sess.GetAddr(); a != nil {
-			delete(m.addrMap, a.String())
-		}
-
-		if roomSessions, ok := m.roomMap[sess.RoomID]; ok {
-			delete(roomSessions, sessionID)
-			if len(roomSessions) == 0 {
+		if room := m.roomMap[sess.RoomID]; room != nil {
+			delete(room.sessions, sessionID)
+			if len(room.sessions) == 0 {
 				delete(m.roomMap, sess.RoomID)
+			} else {
+				touchedRooms[sess.RoomID] = room
 			}
 		}
+	}
+
+	for _, room := range touchedRooms {
+		room.rebuildSnapshotLocked()
 	}
 
 	return removed
@@ -436,11 +513,11 @@ func (s *Session) UpdateSubscriptions(subs []uint32) {
 	defer s.mu.Unlock()
 
 	if len(subs) == 0 {
-		s.Subscriptions = nil // Subscribe to all
+		s.Subscriptions = nil
 		return
 	}
 
-	s.Subscriptions = make(map[uint32]bool)
+	s.Subscriptions = make(map[uint32]bool, len(subs))
 	for _, ssrc := range subs {
 		s.Subscriptions[ssrc] = true
 	}

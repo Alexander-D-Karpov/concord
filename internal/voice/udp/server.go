@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"runtime"
 	"sync"
 
 	"github.com/Alexander-D-Karpov/concord/internal/auth/jwt"
@@ -27,12 +28,11 @@ type Server struct {
 }
 
 type packetJob struct {
-	data []byte
+	pkt  *packetBuffer
 	addr *net.UDPAddr
 }
 
 const (
-	numWorkers   = 4
 	workChanSize = 10000
 	maxPacketLen = 1500
 )
@@ -72,23 +72,23 @@ func NewServer(
 	)
 
 	return &Server{
-		conn:     conn,
-		handler:  handler,
-		logger:   logger,
-		metrics:  metrics,
-		stopChan: make(chan struct{}),
-		workChan: make(chan *packetJob, workChanSize),
-		packetPool: sync.Pool{
-			New: func() interface{} {
-				b := make([]byte, maxPacketLen)
-				return &b
-			},
-		},
+		conn:       conn,
+		handler:    handler,
+		logger:     logger,
+		metrics:    metrics,
+		stopChan:   make(chan struct{}),
+		workChan:   make(chan *packetJob, workChanSize),
+		packetPool: newPacketPool(),
 	}, nil
 }
 
 func (s *Server) Start(ctx context.Context) error {
 	s.logger.Info("UDP server starting", zap.String("address", s.conn.LocalAddr().String()))
+
+	numWorkers := runtime.NumCPU() * 2
+	if numWorkers < 4 {
+		numWorkers = 4
+	}
 
 	for i := 0; i < numWorkers; i++ {
 		s.wg.Add(1)
@@ -110,12 +110,12 @@ func (s *Server) readLoop() {
 	defer s.wg.Done()
 
 	for {
-		bufPtr := s.packetPool.Get().(*[]byte)
-		buf := *bufPtr
+		pkt := s.packetPool.Get().(*packetBuffer)
+		buf := pkt.PrepareForRead()
 
 		n, addr, err := s.conn.ReadFromUDP(buf)
 		if err != nil {
-			s.packetPool.Put(bufPtr)
+			pkt.Release()
 			select {
 			case <-s.stopChan:
 				return
@@ -125,20 +125,19 @@ func (s *Server) readLoop() {
 		}
 
 		if n > maxPacketLen {
-			s.packetPool.Put(bufPtr)
+			pkt.Release()
 			continue
 		}
 
-		data := make([]byte, n)
-		copy(data, buf[:n])
-		s.packetPool.Put(bufPtr)
+		pkt.SetLen(n)
 
 		select {
-		case s.workChan <- &packetJob{data: data, addr: addr}:
+		case s.workChan <- &packetJob{pkt: pkt, addr: addr}:
 		default:
 			if s.metrics != nil {
 				s.metrics.RecordPacketDropped()
 			}
+			pkt.Release()
 		}
 	}
 }
@@ -150,7 +149,8 @@ func (s *Server) worker() {
 		select {
 		case job := <-s.workChan:
 			if job != nil {
-				s.handler.HandlePacket(job.data, job.addr, s.conn)
+				s.handler.HandlePacketOwned(job.pkt.Bytes(), job.pkt, job.addr, s.conn)
+				job.pkt.Release()
 			}
 		case <-s.stopChan:
 			return

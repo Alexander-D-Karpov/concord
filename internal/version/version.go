@@ -31,7 +31,7 @@ const (
 	APIPatch = 0
 
 	VoiceMajor = 0
-	VoiceMinor = 1
+	VoiceMinor = 2
 	VoicePatch = 0
 )
 

@@ -48,13 +48,17 @@ func EffectiveStatus(statusPreference string, presence string) string {
 		return StatusOffline
 	}
 
+	if statusPreference == StatusDND {
+		if presence == StatusOffline {
+			return StatusOffline
+		}
+		return StatusDND
+	}
+
 	switch presence {
 	case StatusAway:
 		return StatusAway
 	case StatusOnline:
-		if statusPreference == StatusDND {
-			return StatusDND
-		}
 		return StatusOnline
 	default:
 		return StatusOffline
@@ -351,33 +355,10 @@ func (s *Service) UpdateStatus(ctx context.Context, status string) (*User, error
 		return nil, errors.BadRequest("invalid user id")
 	}
 
-	switch status {
-	case StatusAway:
-		if s.presence != nil {
-			if err := s.presence.SetAway(ctx, id); err != nil {
-				return nil, err
-			}
-		}
+	preference := NormalizeStatusPreference(status)
 
-	case StatusOnline, StatusDND, StatusOffline, "invisible":
-		normalized := NormalizeStatusPreference(status)
-
-		if err := s.repo.UpdateStatus(ctx, id, normalized); err != nil {
-			return nil, err
-		}
-
-		if s.presence != nil {
-			if normalized != StatusOffline && s.presence.GetStatus(id) == StatusOffline {
-				if err := s.presence.SetOnline(ctx, id); err != nil {
-					return nil, err
-				}
-			} else {
-				s.presence.Refresh(ctx, id)
-			}
-		}
-
-	default:
-		return nil, errors.BadRequest("invalid status")
+	if err := s.repo.UpdateStatus(ctx, id, preference); err != nil {
+		return nil, err
 	}
 
 	user, err := s.repo.GetByID(ctx, id)
@@ -386,6 +367,11 @@ func (s *Service) UpdateStatus(ctx context.Context, status string) (*User, error
 	}
 
 	s.decorateSelfUserStatus(user)
+
+	if s.presence != nil {
+		s.presence.broadcastCurrentStatus(ctx, id)
+	}
+
 	return user, nil
 }
 

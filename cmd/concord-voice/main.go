@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Alexander-D-Karpov/concord/internal/version"
+	"github.com/Alexander-D-Karpov/concord/internal/voice/status"
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 
@@ -80,12 +81,11 @@ func run() error {
 	sessionManager := session.NewManager()
 	roomManager := room.NewManager()
 
-	// Router needs access to both session and room state
-	voiceRouter := router.NewRouter(sessionManager, logger)
-
 	// Metrics and health
 	metrics := telemetry.NewMetrics(logger)
 	telemetryLogger := telemetry.NewLogger(logger)
+
+	voiceRouter := router.NewRouter(sessionManager, logger, metrics)
 
 	healthServer := health.NewServer(logger)
 	healthServer.RegisterCheck("sessions", func(ctx context.Context) error {
@@ -146,6 +146,14 @@ func run() error {
 		udpPort,
 	)
 	netinfo.PrintAccessBanner(advertised, "Concord Voice Server")
+
+	statusSrv := status.NewServer(sessionManager, jwtManager, metrics, logger)
+	go func() {
+		err := statusSrv.Start(ctx, cfg.Voice.StatusPort)
+		if err != nil {
+			logger.Error("status server error", zap.Error(err))
+		}
+	}()
 
 	var registrar *discovery.Registrar
 	if cfg.Voice.RegistryURL != "" {

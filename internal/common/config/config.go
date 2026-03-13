@@ -70,6 +70,7 @@ type VoiceConfig struct {
 	Secret       string
 	RegistryURL  string
 	PublicHost   string
+	StatusPort   int
 }
 
 type LoggingConfig struct {
@@ -97,6 +98,7 @@ type RateLimitConfig struct {
 	Enabled           bool
 	RequestsPerMinute int
 	Burst             int
+	BypassToken       string
 }
 
 type EmailConfig struct {
@@ -150,6 +152,7 @@ func Load() (*Config, error) {
 			Secret:       getEnv("VOICE_SECRET", "change-me-voice-server-secret"),
 			RegistryURL:  getEnv("REGISTRY_URL", "localhost:9090"),
 			PublicHost:   getEnv("VOICE_PUBLIC_HOST", "localhost"),
+			StatusPort:   getEnvInt("VOICE_STATUS_PORT", 9092),
 		},
 		Logging: LoggingConfig{
 			Level:      getEnv("LOG_LEVEL", "info"),
@@ -169,6 +172,7 @@ func Load() (*Config, error) {
 			Enabled:           getEnvBool("RATE_LIMIT_ENABLED", true),
 			RequestsPerMinute: getEnvInt("RATE_LIMIT_REQUESTS_PER_MINUTE", 60),
 			Burst:             getEnvInt("RATE_LIMIT_BURST", 10),
+			BypassToken:       getEnv("RATE_LIMIT_BYPASS_TOKEN", ""),
 		},
 		Storage: StorageConfig{
 			Path: getEnv("STORAGE_PATH", "./uploads"),

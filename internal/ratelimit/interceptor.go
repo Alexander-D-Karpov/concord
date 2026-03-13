@@ -11,6 +11,8 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+const BypassMetadataKey = "x-concord-ratelimit-bypass"
+
 type Interceptor struct {
 	limiter *Limiter
 }
@@ -26,6 +28,10 @@ func (i *Interceptor) Unary() grpc.UnaryServerInterceptor {
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (interface{}, error) {
+		if i.limiter.ShouldBypass(ctx) {
+			return handler(ctx, req)
+		}
+
 		key := i.getKey(ctx, info.FullMethod)
 
 		allowed, err := i.limiter.Allow(ctx, key)
@@ -49,6 +55,11 @@ func (i *Interceptor) Stream() grpc.StreamServerInterceptor {
 		handler grpc.StreamHandler,
 	) error {
 		ctx := ss.Context()
+
+		if i.limiter.ShouldBypass(ctx) {
+			return handler(srv, ss)
+		}
+
 		key := i.getKey(ctx, info.FullMethod)
 
 		allowed, err := i.limiter.Allow(ctx, key)

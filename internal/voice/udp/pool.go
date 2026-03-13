@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"runtime"
 	"sync"
 
 	"github.com/Alexander-D-Karpov/concord/internal/auth/jwt"
@@ -30,7 +31,7 @@ type ServerPool struct {
 }
 
 type poolJob struct {
-	data []byte
+	pkt  *packetBuffer
 	addr *net.UDPAddr
 	conn *net.UDPConn
 }
@@ -61,12 +62,7 @@ func NewServerPool(
 		metrics:    metrics,
 		workChan:   make(chan *poolJob, workChanSize),
 		stopChan:   make(chan struct{}),
-		packetPool: sync.Pool{
-			New: func() interface{} {
-				b := make([]byte, maxPacketLen)
-				return &b
-			},
-		},
+		packetPool: newPacketPool(),
 	}
 
 	for i := 0; i < count; i++ {
@@ -108,6 +104,11 @@ func (p *ServerPool) ConnForPort(port int) *net.UDPConn {
 }
 
 func (p *ServerPool) Start(ctx context.Context) error {
+	numWorkers := runtime.NumCPU() * 2
+	if numWorkers < 4 {
+		numWorkers = 4
+	}
+
 	for i := 0; i < numWorkers; i++ {
 		p.wg.Add(1)
 		go p.worker()
@@ -136,12 +137,12 @@ func (p *ServerPool) readLoop(conn *net.UDPConn) {
 	defer p.wg.Done()
 
 	for {
-		bufPtr := p.packetPool.Get().(*[]byte)
-		buf := *bufPtr
+		pkt := p.packetPool.Get().(*packetBuffer)
+		buf := pkt.PrepareForRead()
 
 		n, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			p.packetPool.Put(bufPtr)
+			pkt.Release()
 			select {
 			case <-p.stopChan:
 				return
@@ -151,20 +152,19 @@ func (p *ServerPool) readLoop(conn *net.UDPConn) {
 		}
 
 		if n > maxPacketLen {
-			p.packetPool.Put(bufPtr)
+			pkt.Release()
 			continue
 		}
 
-		data := make([]byte, n)
-		copy(data, buf[:n])
-		p.packetPool.Put(bufPtr)
+		pkt.SetLen(n)
 
 		select {
-		case p.workChan <- &poolJob{data: data, addr: addr, conn: conn}:
+		case p.workChan <- &poolJob{pkt: pkt, addr: addr, conn: conn}:
 		default:
 			if p.metrics != nil {
 				p.metrics.RecordPacketDropped()
 			}
+			pkt.Release()
 		}
 	}
 }
@@ -176,7 +176,8 @@ func (p *ServerPool) worker() {
 		select {
 		case job := <-p.workChan:
 			if job != nil {
-				p.handler.HandlePacket(job.data, job.addr, job.conn)
+				p.handler.HandlePacketOwned(job.pkt.Bytes(), job.pkt, job.addr, job.conn)
+				job.pkt.Release()
 			}
 		case <-p.stopChan:
 			return
