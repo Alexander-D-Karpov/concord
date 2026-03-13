@@ -396,13 +396,15 @@ func (b *bot) hello() error {
 }
 
 func (b *bot) recvLoop(ctx context.Context) {
-	buf := make([]byte, 2048)
+	buf := make([]byte, 64*1024)
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
+
 		b.conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 		n, err := b.conn.Read(buf)
 		if err != nil {
@@ -417,16 +419,18 @@ func (b *bot) recvLoop(ctx context.Context) {
 			b.st.errors.Add(1)
 			continue
 		}
+
 		if n < 1 {
 			continue
 		}
+
 		b.st.bytesIn.Add(uint64(n))
 
 		switch buf[0] {
 		case pktWelcome:
 			var w map[string]interface{}
 			if err := json.Unmarshal(buf[1:n], &w); err != nil {
-				log.Printf("[BOT %d] bad welcome json: %v", b.idx, err)
+				log.Printf("[BOT %d] bad welcome json (%d bytes): %v", b.idx, n, err)
 				continue
 			}
 			if v, ok := w["ssrc"].(float64); ok {
@@ -459,6 +463,9 @@ func (b *bot) recvLoop(ctx context.Context) {
 				b.st.pongRecv.Add(1)
 				b.st.addRTT(rtt)
 			}
+
+		case pktHello, pktBye:
+			// ignore control packets not needed by the stress tool
 		}
 	}
 }
@@ -468,7 +475,7 @@ func (b *bot) audioLoop(ctx context.Context) {
 	case <-b.ready:
 	case <-ctx.Done():
 		return
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		log.Printf("[BOT %d] timeout waiting for welcome, skipping audio", b.idx)
 		return
 	}

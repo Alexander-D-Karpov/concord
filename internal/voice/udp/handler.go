@@ -144,35 +144,31 @@ func (h *Handler) handleHello(data []byte, addr *net.UDPAddr, conn *net.UDPConn)
 	}
 
 	existingSessions := h.sessionManager.GetRoomSessions(claims.RoomID)
-	sess := h.sessionManager.CreateSession(claims.UserID, claims.RoomID, addr, sessionCrypto, hello.VideoEnabled)
 
-	participants := make([]protocol.ParticipantInfo, 0, len(existingSessions))
-	for _, es := range existingSessions {
-		participants = append(participants, protocol.ParticipantInfo{
-			UserID:        es.UserID,
-			SSRC:          es.SSRC,
-			VideoSSRC:     es.VideoSSRC,
-			ScreenSSRC:    es.ScreenSSRC,
-			Muted:         es.Muted,
-			VideoEnabled:  es.VideoEnabled,
-			ScreenSharing: es.ScreenSharing,
-		})
-	}
+	sess := h.sessionManager.CreateSession(claims.UserID, claims.RoomID, addr, sessionCrypto, hello.VideoEnabled)
 
 	welcome := protocol.WelcomePayload{
 		SessionID:    sess.ID,
 		SSRC:         sess.SSRC,
 		VideoSSRC:    sess.VideoSSRC,
 		ScreenSSRC:   sess.ScreenSSRC,
-		Participants: participants,
+		Participants: make([]protocol.ParticipantInfo, 0),
 	}
 
 	welcomeData, _ := json.Marshal(welcome)
 	out := make([]byte, 1+len(welcomeData))
 	out[0] = protocol.PacketTypeWelcome
 	copy(out[1:], welcomeData)
-	_ = h.send(out, addr, conn)
 
+	if err := h.send(out, addr, conn); err != nil {
+		h.logger.Warn("failed to send welcome", zap.Error(err))
+		return
+	}
+
+	// Send existing participants as separate small packets to the new client.
+	h.sendInitialParticipantSnapshot(addr, existingSessions, conn)
+
+	// Notify existing participants about the new one.
 	h.broadcastJoined(claims.RoomID, sess, conn)
 
 	h.logger.Info("session created",
@@ -182,6 +178,36 @@ func (h *Handler) handleHello(data []byte, addr *net.UDPAddr, conn *net.UDPConn)
 		zap.Uint32("video_ssrc", sess.VideoSSRC),
 		zap.Uint32("screen_ssrc", sess.ScreenSSRC),
 	)
+}
+
+func (h *Handler) sendInitialParticipantSnapshot(to *net.UDPAddr, sessions []*session.Session, conn *net.UDPConn) {
+	for _, s := range sessions {
+		if s == nil {
+			continue
+		}
+
+		payload := protocol.MediaStatePayload{
+			SSRC:          s.SSRC,
+			VideoSSRC:     s.VideoSSRC,
+			ScreenSSRC:    s.ScreenSSRC,
+			UserID:        s.UserID,
+			RoomID:        s.RoomID,
+			Muted:         s.Muted,
+			VideoEnabled:  s.VideoEnabled,
+			ScreenSharing: s.ScreenSharing,
+		}
+
+		data, err := json.Marshal(payload)
+		if err != nil {
+			continue
+		}
+
+		pkt := make([]byte, 1+len(data))
+		pkt[0] = protocol.PacketTypeMediaState
+		copy(pkt[1:], data)
+
+		_ = h.send(pkt, to, conn)
+	}
 }
 
 func (h *Handler) handlePing(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {
