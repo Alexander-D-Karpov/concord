@@ -16,15 +16,19 @@ import (
 )
 
 type Participant struct {
-	UserID        string `json:"user_id"`
-	SSRC          uint32 `json:"ssrc"`
-	VideoSSRC     uint32 `json:"video_ssrc,omitempty"`
-	ScreenSSRC    uint32 `json:"screen_ssrc,omitempty"`
-	Muted         bool   `json:"muted"`
-	VideoEnabled  bool   `json:"video_enabled"`
-	ScreenSharing bool   `json:"screen_sharing"`
-	Speaking      bool   `json:"speaking"`
-	JoinedAt      string `json:"joined_at"`
+	UserID        string  `json:"user_id"`
+	SSRC          uint32  `json:"ssrc"`
+	VideoSSRC     uint32  `json:"video_ssrc,omitempty"`
+	ScreenSSRC    uint32  `json:"screen_ssrc,omitempty"`
+	Muted         bool    `json:"muted"`
+	VideoEnabled  bool    `json:"video_enabled"`
+	ScreenSharing bool    `json:"screen_sharing"`
+	Speaking      bool    `json:"speaking"`
+	Quality       int     `json:"quality,omitempty"`
+	RTTMs         float64 `json:"rtt_ms,omitempty"`
+	PacketLoss    float64 `json:"packet_loss,omitempty"`
+	JitterMs      float64 `json:"jitter_ms,omitempty"`
+	JoinedAt      string  `json:"joined_at"`
 }
 
 type RoomInfo struct {
@@ -61,12 +65,7 @@ func (s *Server) Start(ctx context.Context, port int) error {
 	mux.HandleFunc("/v1/voice/stats", s.auth(s.stats))
 	mux.HandleFunc("/v1/voice/health", s.health)
 
-	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", port),
-		Handler:      cors(mux),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-	}
+	srv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: cors(mux), ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
 	s.logger.Info("status API starting", zap.Int("port", port))
 
 	errCh := make(chan error, 1)
@@ -107,8 +106,7 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		token := strings.TrimPrefix(h, "Bearer ")
-		_, err := s.jwt.ValidateAccessToken(token)
-		if err != nil {
+		if _, err := s.jwt.ValidateAccessToken(token); err != nil {
 			writeErr(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
@@ -127,8 +125,7 @@ func (s *Server) listRooms(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) roomDetail(w http.ResponseWriter, r *http.Request) {
-	roomID := strings.TrimPrefix(r.URL.Path, "/v1/voice/rooms/")
-	roomID = strings.TrimSuffix(roomID, "/")
+	roomID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/voice/rooms/"), "/")
 	if roomID == "" {
 		writeErr(w, http.StatusBadRequest, "room_id required")
 		return
@@ -136,6 +133,7 @@ func (s *Server) roomDetail(w http.ResponseWriter, r *http.Request) {
 	sess := s.sessions.GetRoomSessions(roomID)
 	ps := make([]Participant, 0, len(sess))
 	for _, se := range sess {
+		quality, rttMs, packetLoss, jitterMs := se.SnapshotQuality()
 		ps = append(ps, Participant{
 			UserID:        se.UserID,
 			SSRC:          se.SSRC,
@@ -145,7 +143,11 @@ func (s *Server) roomDetail(w http.ResponseWriter, r *http.Request) {
 			VideoEnabled:  se.VideoEnabled,
 			ScreenSharing: se.ScreenSharing,
 			Speaking:      se.Speaking,
-			JoinedAt:      se.LastActivity().Format(time.RFC3339),
+			Quality:       quality,
+			RTTMs:         rttMs,
+			PacketLoss:    packetLoss,
+			JitterMs:      jitterMs,
+			JoinedAt:      se.JoinedAt.Format(time.RFC3339),
 		})
 	}
 	writeJSON(w, RoomInfo{RoomID: roomID, Participants: ps, Count: len(ps)})
@@ -160,13 +162,7 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		rc[rid] = n
 		total += n
 	}
-	info := ServerInfo{
-		Version:        version.Voice(),
-		Uptime:         time.Since(s.startTime).Truncate(time.Second).String(),
-		ActiveRooms:    len(rooms),
-		ActiveSessions: total,
-		Rooms:          rc,
-	}
+	info := ServerInfo{Version: version.Voice(), Uptime: time.Since(s.startTime).Truncate(time.Second).String(), ActiveRooms: len(rooms), ActiveSessions: total, Rooms: rc}
 	if s.metrics != nil {
 		st := s.metrics.GetStats()
 		info.Metrics = &st
@@ -180,11 +176,11 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }

@@ -8,6 +8,8 @@ import (
 )
 
 const (
+	ProtocolVersion = 2
+
 	MediaHeaderSize = 24
 	FragHeaderSize  = 12
 	MaxPacketSize   = 1500
@@ -27,6 +29,7 @@ const (
 	PacketTypeRR              = 0x0c
 	PacketTypeParticipantLeft = 0x0d
 	PacketTypeSubscribe       = 0x0e
+	PacketTypeQualityPref     = 0x0f
 	PacketTypeQualityReport   = 0x10
 
 	FlagMarker   = 0x01
@@ -128,15 +131,14 @@ func ParsePacket(data []byte) (*Packet, error) {
 		return nil, ErrTooSmall
 	}
 
-	packetType := data[0]
-
-	switch packetType {
+	switch data[0] {
 	case PacketTypeAudio, PacketTypeVideo:
 		return parseMediaPacket(data)
 	default:
 		return &Packet{
-			Header:  MediaHeader{Type: packetType},
+			Header:  MediaHeader{Type: data[0]},
 			Payload: data[1:],
+			Type:    data[0],
 		}, nil
 	}
 }
@@ -154,6 +156,7 @@ func parseMediaPacket(data []byte) (*Packet, error) {
 	packet := &Packet{
 		Header: *header,
 		RawAAD: make([]byte, MediaHeaderSize),
+		Type:   header.Type,
 	}
 	copy(packet.RawAAD, data[:MediaHeaderSize])
 
@@ -172,20 +175,14 @@ func (p *Packet) Marshal() []byte {
 	return buf
 }
 
-func (p *Packet) IsAudio() bool {
-	return p.Header.Type == PacketTypeAudio
-}
-
-func (p *Packet) IsVideo() bool {
-	return p.Header.Type == PacketTypeVideo
-}
-
+func (p *Packet) IsAudio() bool { return p.Header.Type == PacketTypeAudio }
+func (p *Packet) IsVideo() bool { return p.Header.Type == PacketTypeVideo }
 func (p *Packet) IsKeyframe() bool {
 	return (p.Header.Flags & FlagKeyframe) != 0
 }
 
 func (p *Packet) String() string {
-	return fmt.Sprintf("Packet{Type: %d, Seq: %d, TS: %d, SSRC: %d, Counter: %d}",
+	return fmt.Sprintf("Packet{Type:%d Seq:%d TS:%d SSRC:%d Counter:%d}",
 		p.Header.Type, p.Header.Sequence, p.Header.Timestamp, p.Header.SSRC, p.Header.Counter)
 }
 
@@ -193,7 +190,6 @@ func (p *Packet) GetRoomIDString() string {
 	if len(p.Payload) == 0 {
 		return ""
 	}
-
 	var aux struct {
 		RoomID string `json:"room_id"`
 	}
@@ -216,27 +212,39 @@ type HelloPayload struct {
 
 type CryptoInfo struct {
 	AEAD        string `json:"aead,omitempty"`
-	KeyID       []byte `json:"key_id"`
-	KeyMaterial []byte `json:"key_material"`
-	NonceBase   []byte `json:"nonce_base"`
+	KeyID       []byte `json:"key_id,omitempty"`
+	KeyMaterial []byte `json:"key_material,omitempty"`
+	NonceBase   []byte `json:"nonce_base,omitempty"`
 }
 
 type WelcomePayload struct {
-	SessionID    uint32            `json:"session_id"`
-	SSRC         uint32            `json:"ssrc"`
-	VideoSSRC    uint32            `json:"video_ssrc,omitempty"`
-	ScreenSSRC   uint32            `json:"screen_ssrc,omitempty"`
-	Participants []ParticipantInfo `json:"participants"`
+	Protocol       uint8             `json:"protocol"`
+	SessionID      uint32            `json:"session_id"`
+	RoomID         string            `json:"room_id,omitempty"`
+	UserID         string            `json:"user_id,omitempty"`
+	SSRC           uint32            `json:"ssrc"`
+	VideoSSRC      uint32            `json:"video_ssrc,omitempty"`
+	ScreenSSRC     uint32            `json:"screen_ssrc,omitempty"`
+	PingIntervalMs uint32            `json:"ping_interval_ms,omitempty"`
+	RRIntervalMs   uint32            `json:"rr_interval_ms,omitempty"`
+	Participants   []ParticipantInfo `json:"participants"`
 }
 
 type ParticipantInfo struct {
-	UserID        string `json:"user_id"`
-	SSRC          uint32 `json:"ssrc"`
-	VideoSSRC     uint32 `json:"video_ssrc,omitempty"`
-	ScreenSSRC    uint32 `json:"screen_ssrc,omitempty"`
-	Muted         bool   `json:"muted"`
-	VideoEnabled  bool   `json:"video_enabled"`
-	ScreenSharing bool   `json:"screen_sharing"`
+	UserID        string  `json:"user_id"`
+	SSRC          uint32  `json:"ssrc"`
+	VideoSSRC     uint32  `json:"video_ssrc,omitempty"`
+	ScreenSSRC    uint32  `json:"screen_ssrc,omitempty"`
+	Muted         bool    `json:"muted"`
+	VideoEnabled  bool    `json:"video_enabled"`
+	ScreenSharing bool    `json:"screen_sharing"`
+	Speaking      bool    `json:"speaking,omitempty"`
+	Quality       int     `json:"quality,omitempty"`
+	RTTMs         float64 `json:"rtt_ms,omitempty"`
+	PacketLoss    float64 `json:"packet_loss,omitempty"`
+	JitterMs      float64 `json:"jitter_ms,omitempty"`
+	DisplayName   string  `json:"display_name,omitempty"`
+	AvatarURL     string  `json:"avatar_url,omitempty"`
 }
 
 type SpeakingPayload struct {
@@ -287,7 +295,7 @@ type ParticipantLeftPayload struct {
 }
 
 type SubscribePayload struct {
-	Subscriptions []uint32 `json:"subscriptions"` // List of SSRCs to subscribe to
+	Subscriptions []uint32 `json:"subscriptions"`
 }
 
 type QualityReportPayload struct {
@@ -307,7 +315,6 @@ func ParseNack(data []byte) (*NackPayload, error) {
 
 	ssrc := binary.BigEndian.Uint32(data[1:5])
 	count := binary.BigEndian.Uint16(data[5:7])
-
 	if len(data) < 7+int(count)*2 {
 		return nil, ErrTooSmall
 	}
@@ -316,7 +323,6 @@ func ParseNack(data []byte) (*NackPayload, error) {
 	for i := uint16(0); i < count; i++ {
 		sequences[i] = binary.BigEndian.Uint16(data[7+i*2 : 9+i*2])
 	}
-
 	return &NackPayload{SSRC: ssrc, Sequences: sequences}, nil
 }
 
@@ -349,12 +355,11 @@ func ParseReceiverReport(data []byte) (*ReceiverReport, error) {
 	if len(data) < 25 {
 		return nil, ErrTooSmall
 	}
-
 	return &ReceiverReport{
 		SSRC:             binary.BigEndian.Uint32(data[1:5]),
 		ReporterSSRC:     binary.BigEndian.Uint32(data[5:9]),
 		FractionLost:     float64(data[9]) / 255.0,
-		TotalLost:        binary.BigEndian.Uint32(data[10:14]) & 0xffffff,
+		TotalLost:        uint32(data[10])<<16 | uint32(data[11])<<8 | uint32(data[12]),
 		HighestSeq:       binary.BigEndian.Uint32(data[13:17]),
 		Jitter:           binary.BigEndian.Uint32(data[17:21]),
 		LastSR:           binary.BigEndian.Uint32(data[21:25]),
@@ -383,7 +388,6 @@ func CreateVideoPacket(ssrc uint32, sequence uint16, timestamp uint32, keyID uin
 	if keyframe {
 		flags |= FlagKeyframe
 	}
-
 	return &Packet{
 		Header: MediaHeader{
 			Type:      PacketTypeVideo,
@@ -405,4 +409,15 @@ func ParseJSON[T any](data []byte) (*T, error) {
 		return nil, err
 	}
 	return &result, nil
+}
+
+func BuildJSONPacket(packetType uint8, payload any) ([]byte, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 1+len(data))
+	out[0] = packetType
+	copy(out[1:], data)
+	return out, nil
 }

@@ -23,27 +23,14 @@ type Handler struct {
 	metrics        *telemetry.Metrics
 }
 
-func NewHandler(
-	sessionManager *session.Manager,
-	voiceRouter *router.Router,
-	validator *voiceauth.Validator,
-	logger *zap.Logger,
-	metrics *telemetry.Metrics,
-) *Handler {
-	return &Handler{
-		sessionManager: sessionManager,
-		router:         voiceRouter,
-		validator:      validator,
-		logger:         logger,
-		metrics:        metrics,
-	}
+func NewHandler(sessionManager *session.Manager, voiceRouter *router.Router, validator *voiceauth.Validator, logger *zap.Logger, metrics *telemetry.Metrics) *Handler {
+	return &Handler{sessionManager: sessionManager, router: voiceRouter, validator: validator, logger: logger, metrics: metrics}
 }
 
 func (h *Handler) handlePacket(data []byte, owner router.PacketOwner, addr *net.UDPAddr, conn *net.UDPConn) {
 	if len(data) < 1 {
 		return
 	}
-
 	if h.metrics != nil {
 		h.metrics.RecordPacketReceived(uint64(len(data)))
 	}
@@ -86,28 +73,28 @@ func (h *Handler) handleMedia(data []byte, owner router.PacketOwner, addr *net.U
 	if len(data) < protocol.MediaHeaderSize {
 		return
 	}
-
 	hdr, err := protocol.ParseMediaHeader(data)
 	if err != nil {
 		return
 	}
-
 	sess := h.sessionManager.GetBySSRC(hdr.SSRC)
 	if sess == nil {
 		return
 	}
-
 	if sess.AddrChanged(addr) {
 		h.sessionManager.BindAddr(sess.ID, addr)
 	}
 	h.sessionManager.Touch(sess.ID)
-
-	// Store retransmit only for video.
-	// Audio is high-rate and usually not worth the copy + map churn.
+	if h.metrics != nil {
+		if hdr.Type == protocol.PacketTypeAudio {
+			h.metrics.RecordAudioIn()
+		} else {
+			h.metrics.RecordVideoIn()
+		}
+	}
 	if hdr.Type == protocol.PacketTypeVideo {
 		sess.StoreForRetransmit(hdr.SSRC, hdr.Sequence, data)
 	}
-
 	if owner != nil {
 		h.router.RouteMediaOwned(*hdr, data, owner, addr, conn)
 	} else {
@@ -118,8 +105,11 @@ func (h *Handler) handleMedia(data []byte, owner router.PacketOwner, addr *net.U
 func (h *Handler) handleHello(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {
 	var hello protocol.HelloPayload
 	if err := json.Unmarshal(data[1:], &hello); err != nil {
-		h.logger.Error("failed to unmarshal hello", zap.Error(err))
+		h.logger.Warn("failed to unmarshal hello", zap.Error(err))
 		return
+	}
+	if h.metrics != nil {
+		h.metrics.RecordHello()
 	}
 
 	claims, err := h.validator.ValidateToken(context.Background(), hello.Token)
@@ -137,40 +127,62 @@ func (h *Handler) handleHello(data []byte, addr *net.UDPAddr, conn *net.UDPConn)
 		sessionCrypto, _ = crypto.NewSessionCrypto(hello.Crypto.KeyMaterial, hello.Crypto.NonceBase, keyID)
 	}
 
-	existing := h.sessionManager.GetSessionByUserInRoom(claims.UserID, claims.RoomID)
-	if existing != nil {
-		h.broadcastParticipantLeft(existing.RoomID, existing.UserID, existing.SSRC, existing.VideoSSRC, conn)
+	if existing := h.sessionManager.GetSessionByUserInRoom(claims.UserID, claims.RoomID); existing != nil {
 		h.sessionManager.RemoveSession(existing.ID)
+		h.broadcastParticipantLeft(claims.RoomID, existing.UserID, existing.SSRC, existing.VideoSSRC, existing.ScreenSSRC, conn)
 	}
 
 	existingSessions := h.sessionManager.GetRoomSessions(claims.RoomID)
-
 	sess := h.sessionManager.CreateSession(claims.UserID, claims.RoomID, addr, sessionCrypto, hello.VideoEnabled)
 
-	welcome := protocol.WelcomePayload{
-		SessionID:    sess.ID,
-		SSRC:         sess.SSRC,
-		VideoSSRC:    sess.VideoSSRC,
-		ScreenSSRC:   sess.ScreenSSRC,
-		Participants: make([]protocol.ParticipantInfo, 0),
+	participants := make([]protocol.ParticipantInfo, 0, len(existingSessions))
+	for _, s := range existingSessions {
+		if s == nil {
+			continue
+		}
+		quality, rttMs, packetLoss, jitterMs := s.SnapshotQuality()
+		participants = append(participants, protocol.ParticipantInfo{
+			UserID:        s.UserID,
+			SSRC:          s.SSRC,
+			VideoSSRC:     s.VideoSSRC,
+			ScreenSSRC:    s.ScreenSSRC,
+			Muted:         s.Muted,
+			VideoEnabled:  s.VideoEnabled,
+			ScreenSharing: s.ScreenSharing,
+			Speaking:      s.Speaking,
+			Quality:       quality,
+			RTTMs:         rttMs,
+			PacketLoss:    packetLoss,
+			JitterMs:      jitterMs,
+		})
 	}
 
-	welcomeData, _ := json.Marshal(welcome)
-	out := make([]byte, 1+len(welcomeData))
-	out[0] = protocol.PacketTypeWelcome
-	copy(out[1:], welcomeData)
-
+	welcome := protocol.WelcomePayload{
+		Protocol:       protocol.ProtocolVersion,
+		SessionID:      sess.ID,
+		RoomID:         claims.RoomID,
+		UserID:         claims.UserID,
+		SSRC:           sess.SSRC,
+		VideoSSRC:      sess.VideoSSRC,
+		ScreenSSRC:     sess.ScreenSSRC,
+		PingIntervalMs: 5000,
+		RRIntervalMs:   250,
+		Participants:   participants,
+	}
+	out, err := protocol.BuildJSONPacket(protocol.PacketTypeWelcome, welcome)
+	if err != nil {
+		h.logger.Warn("failed to marshal welcome", zap.Error(err))
+		return
+	}
 	if err := h.send(out, addr, conn); err != nil {
 		h.logger.Warn("failed to send welcome", zap.Error(err))
 		return
 	}
+	if h.metrics != nil {
+		h.metrics.RecordWelcome()
+	}
 
-	// Send existing participants as separate small packets to the new client.
-	h.sendInitialParticipantSnapshot(addr, existingSessions, conn)
-
-	// Notify existing participants about the new one.
 	h.broadcastJoined(claims.RoomID, sess, conn)
-
 	h.logger.Info("session created",
 		zap.String("user_id", claims.UserID),
 		zap.String("room_id", claims.RoomID),
@@ -180,69 +192,41 @@ func (h *Handler) handleHello(data []byte, addr *net.UDPAddr, conn *net.UDPConn)
 	)
 }
 
-func (h *Handler) sendInitialParticipantSnapshot(to *net.UDPAddr, sessions []*session.Session, conn *net.UDPConn) {
-	for _, s := range sessions {
-		if s == nil {
-			continue
-		}
-
-		payload := protocol.MediaStatePayload{
-			SSRC:          s.SSRC,
-			VideoSSRC:     s.VideoSSRC,
-			ScreenSSRC:    s.ScreenSSRC,
-			UserID:        s.UserID,
-			RoomID:        s.RoomID,
-			Muted:         s.Muted,
-			VideoEnabled:  s.VideoEnabled,
-			ScreenSharing: s.ScreenSharing,
-		}
-
-		data, err := json.Marshal(payload)
-		if err != nil {
-			continue
-		}
-
-		pkt := make([]byte, 1+len(data))
-		pkt[0] = protocol.PacketTypeMediaState
-		copy(pkt[1:], data)
-
-		_ = h.send(pkt, to, conn)
-	}
-}
-
 func (h *Handler) handlePing(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {
+	if h.metrics != nil {
+		h.metrics.RecordPing()
+	}
 	if sess := h.sessionManager.GetByAddr(addr); sess != nil {
 		h.sessionManager.Touch(sess.ID)
 	}
-
 	pong := make([]byte, len(data))
 	pong[0] = protocol.PacketTypePong
 	copy(pong[1:], data[1:])
 	_ = h.send(pong, addr, conn)
+	if h.metrics != nil {
+		h.metrics.RecordPong()
+	}
 }
 
 func (h *Handler) handleBye(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {
 	if len(data) < 5 {
 		return
 	}
-
 	ssrc := binary.BigEndian.Uint32(data[1:5])
 	sess := h.sessionManager.GetBySSRC(ssrc)
 	if sess == nil {
 		return
 	}
-
+	if h.metrics != nil {
+		h.metrics.RecordBye()
+	}
 	roomID := sess.RoomID
 	userID := sess.UserID
 	videoSSRC := sess.VideoSSRC
-
+	screenSSRC := sess.ScreenSSRC
 	h.sessionManager.RemoveSession(sess.ID)
-	h.broadcastParticipantLeft(roomID, userID, ssrc, videoSSRC, conn)
-
-	h.logger.Info("session ended",
-		zap.String("user_id", userID),
-		zap.String("room_id", roomID),
-	)
+	h.broadcastParticipantLeft(roomID, userID, ssrc, videoSSRC, screenSSRC, conn)
+	h.logger.Info("session ended", zap.String("user_id", userID), zap.String("room_id", roomID))
 }
 
 func (h *Handler) handleSpeaking(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {
@@ -250,29 +234,23 @@ func (h *Handler) handleSpeaking(data []byte, addr *net.UDPAddr, conn *net.UDPCo
 	if err := json.Unmarshal(data[1:], &speaking); err != nil {
 		return
 	}
-
 	sess := h.sessionManager.GetBySSRC(speaking.SSRC)
 	if sess == nil {
 		return
 	}
-
 	sess.SetSpeaking(speaking.Speaking)
 	h.sessionManager.Touch(sess.ID)
-
-	sessions := h.sessionManager.GetRoomSessions(sess.RoomID)
-	payload, _ := json.Marshal(speaking)
-	pkt := make([]byte, 1+len(payload))
-	pkt[0] = protocol.PacketTypeSpeaking
-	copy(pkt[1:], payload)
-
-	for _, s := range sessions {
-		if s.SSRC == speaking.SSRC {
-			continue
-		}
-		if to := s.GetAddr(); to != nil {
-			_ = h.send(pkt, to, conn)
-		}
+	pkt, err := protocol.BuildJSONPacket(protocol.PacketTypeSpeaking, protocol.SpeakingPayload{
+		SSRC:      sess.SSRC,
+		VideoSSRC: sess.VideoSSRC,
+		UserID:    sess.UserID,
+		RoomID:    sess.RoomID,
+		Speaking:  speaking.Speaking,
+	})
+	if err != nil {
+		return
 	}
+	h.router.RouteControlRoom(pkt, conn, sess.RoomID, sess.ID)
 }
 
 func (h *Handler) handleMediaState(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {
@@ -280,12 +258,10 @@ func (h *Handler) handleMediaState(data []byte, addr *net.UDPAddr, conn *net.UDP
 	if err := json.Unmarshal(data[1:], &ms); err != nil {
 		return
 	}
-
 	sess := h.sessionManager.GetBySSRC(ms.SSRC)
 	if sess == nil {
 		return
 	}
-
 	sess.SetMuted(ms.Muted)
 	sess.SetVideoEnabled(ms.VideoEnabled)
 	sess.SetScreenSharing(ms.ScreenSharing)
@@ -298,13 +274,18 @@ func (h *Handler) handleNack(data []byte, addr *net.UDPAddr, conn *net.UDPConn) 
 	if err != nil {
 		return
 	}
+	if h.metrics != nil {
+		h.metrics.RecordNack()
+	}
 	target := h.sessionManager.GetBySSRC(nack.SSRC)
 	if target == nil {
 		return
 	}
 	for _, seq := range nack.Sequences {
 		if cached := target.GetForRetransmit(nack.SSRC, seq); cached != nil {
-			_ = h.send(cached, addr, conn)
+			if err := h.send(cached, addr, conn); err == nil && h.metrics != nil {
+				h.metrics.RecordRetransmit()
+			}
 		}
 	}
 }
@@ -314,15 +295,14 @@ func (h *Handler) handlePli(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {
 	if err != nil {
 		return
 	}
-
+	if h.metrics != nil {
+		h.metrics.RecordPli()
+	}
 	target := h.sessionManager.GetBySSRC(pli.SSRC)
 	if target == nil {
 		return
 	}
-
-	if to := target.GetAddr(); to != nil {
-		_ = h.send(data, to, conn)
-	}
+	_ = h.router.RouteControlToSession(data, conn, target)
 }
 
 func (h *Handler) handleReceiverReport(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {
@@ -330,15 +310,14 @@ func (h *Handler) handleReceiverReport(data []byte, addr *net.UDPAddr, conn *net
 	if err != nil {
 		return
 	}
-
+	if h.metrics != nil {
+		h.metrics.RecordReceiverReport()
+	}
 	target := h.sessionManager.GetBySSRC(rr.SSRC)
 	if target == nil {
 		return
 	}
-
-	if to := target.GetAddr(); to != nil {
-		_ = h.send(data, to, conn)
-	}
+	_ = h.router.RouteControlToSession(data, conn, target)
 }
 
 func (h *Handler) handleSubscribe(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {
@@ -346,98 +325,90 @@ func (h *Handler) handleSubscribe(data []byte, addr *net.UDPAddr, conn *net.UDPC
 	if sess == nil {
 		return
 	}
-
 	var payload protocol.SubscribePayload
 	if err := json.Unmarshal(data[1:], &payload); err != nil {
 		return
 	}
-
+	if h.metrics != nil {
+		h.metrics.RecordSubscribe()
+	}
+	h.sessionManager.Touch(sess.ID)
 	sess.UpdateSubscriptions(payload.Subscriptions)
 }
 
 func (h *Handler) handleQualityReport(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {
-	if len(data) < 2 {
+	var payload protocol.QualityReportPayload
+	if err := json.Unmarshal(data[1:], &payload); err != nil {
 		return
 	}
-
 	sess := h.sessionManager.GetByAddr(addr)
 	if sess == nil {
 		return
 	}
-
-	h.sessionManager.Touch(sess.ID)
-
-	sessions := h.sessionManager.GetRoomSessions(sess.RoomID)
-	for _, other := range sessions {
-		if other.ID == sess.ID {
-			continue
-		}
-		if to := other.GetAddr(); to != nil {
-			_ = h.send(data, to, conn)
+	if h.metrics != nil {
+		h.metrics.RecordQualityReport()
+		if payload.RTTMs > 0 {
+			h.metrics.RecordRTT(payload.RTTMs)
 		}
 	}
+	payload.UserID = sess.UserID
+	payload.RoomID = sess.RoomID
+	payload.SSRC = sess.SSRC
+	sess.SetQuality(payload.Quality, payload.RTTMs, payload.PacketLoss, payload.JitterMs)
+	h.sessionManager.Touch(sess.ID)
+	pkt, err := protocol.BuildJSONPacket(protocol.PacketTypeQualityReport, payload)
+	if err != nil {
+		return
+	}
+	h.router.RouteControlRoom(pkt, conn, sess.RoomID, sess.ID)
 }
 
 func (h *Handler) broadcastJoined(roomID string, newSess *session.Session, conn *net.UDPConn) {
-	sessions := h.sessionManager.GetRoomSessions(roomID)
-
-	payload := protocol.MediaStatePayload{
-		SSRC: newSess.SSRC, VideoSSRC: newSess.VideoSSRC, ScreenSSRC: newSess.ScreenSSRC,
-		UserID: newSess.UserID, RoomID: roomID,
-		Muted: newSess.Muted, VideoEnabled: newSess.VideoEnabled, ScreenSharing: newSess.ScreenSharing,
+	pkt, err := protocol.BuildJSONPacket(protocol.PacketTypeMediaState, protocol.MediaStatePayload{
+		SSRC:          newSess.SSRC,
+		VideoSSRC:     newSess.VideoSSRC,
+		ScreenSSRC:    newSess.ScreenSSRC,
+		UserID:        newSess.UserID,
+		RoomID:        roomID,
+		Muted:         newSess.Muted,
+		VideoEnabled:  newSess.VideoEnabled,
+		ScreenSharing: newSess.ScreenSharing,
+	})
+	if err != nil {
+		return
 	}
-	data, _ := json.Marshal(payload)
-	pkt := make([]byte, 1+len(data))
-	pkt[0] = protocol.PacketTypeMediaState
-	copy(pkt[1:], data)
-
-	for _, s := range sessions {
-		if s.ID == newSess.ID {
-			continue
-		}
-		if to := s.GetAddr(); to != nil {
-			_ = h.send(pkt, to, conn)
-		}
-	}
+	h.router.RouteControlRoom(pkt, conn, roomID, newSess.ID)
 }
 
-func (h *Handler) broadcastParticipantLeft(roomID, userID string, ssrc, videoSSRC uint32, conn *net.UDPConn) {
-	sessions := h.sessionManager.GetRoomSessions(roomID)
-
-	payload := protocol.ParticipantLeftPayload{UserID: userID, RoomID: roomID, SSRC: ssrc, VideoSSRC: videoSSRC}
-	data, _ := json.Marshal(payload)
-	pkt := make([]byte, 1+len(data))
-	pkt[0] = protocol.PacketTypeParticipantLeft
-	copy(pkt[1:], data)
-
-	for _, s := range sessions {
-		if to := s.GetAddr(); to != nil {
-			_ = h.send(pkt, to, conn)
-		}
+func (h *Handler) broadcastParticipantLeft(roomID, userID string, ssrc, videoSSRC, screenSSRC uint32, conn *net.UDPConn) {
+	pkt, err := protocol.BuildJSONPacket(protocol.PacketTypeParticipantLeft, protocol.ParticipantLeftPayload{
+		UserID:     userID,
+		RoomID:     roomID,
+		SSRC:       ssrc,
+		VideoSSRC:  videoSSRC,
+		ScreenSSRC: screenSSRC,
+	})
+	if err != nil {
+		return
 	}
+	h.router.RouteControlRoom(pkt, conn, roomID, 0)
 }
 
 func (h *Handler) broadcastMediaState(roomID string, sess *session.Session, conn *net.UDPConn) {
-	sessions := h.sessionManager.GetRoomSessions(roomID)
-
-	payload := protocol.MediaStatePayload{
-		SSRC: sess.SSRC, VideoSSRC: sess.VideoSSRC, ScreenSSRC: sess.ScreenSSRC,
-		UserID: sess.UserID, RoomID: roomID,
-		Muted: sess.Muted, VideoEnabled: sess.VideoEnabled, ScreenSharing: sess.ScreenSharing,
+	pkt, err := protocol.BuildJSONPacket(protocol.PacketTypeMediaState, protocol.MediaStatePayload{
+		SSRC:          sess.SSRC,
+		VideoSSRC:     sess.VideoSSRC,
+		ScreenSSRC:    sess.ScreenSSRC,
+		UserID:        sess.UserID,
+		RoomID:        roomID,
+		Muted:         sess.Muted,
+		VideoEnabled:  sess.VideoEnabled,
+		ScreenSharing: sess.ScreenSharing,
+	})
+	if err != nil {
+		return
 	}
-	data, _ := json.Marshal(payload)
-	pkt := make([]byte, 1+len(data))
-	pkt[0] = protocol.PacketTypeMediaState
-	copy(pkt[1:], data)
-
-	for _, s := range sessions {
-		if s.ID == sess.ID {
-			continue
-		}
-		if to := s.GetAddr(); to != nil {
-			_ = h.send(pkt, to, conn)
-		}
-	}
+	h.router.RouteControlRoom(pkt, conn, roomID, sess.ID)
 }
 
 func (h *Handler) send(data []byte, addr *net.UDPAddr, conn *net.UDPConn) error {
