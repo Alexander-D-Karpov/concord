@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net"
 
+	"github.com/Alexander-D-Karpov/concord/internal/auth/jwt"
 	voiceauth "github.com/Alexander-D-Karpov/concord/internal/voice/auth"
 	"github.com/Alexander-D-Karpov/concord/internal/voice/crypto"
 	"github.com/Alexander-D-Karpov/concord/internal/voice/protocol"
@@ -58,6 +59,8 @@ func (h *Handler) handlePacket(data []byte, owner router.PacketOwner, addr *net.
 		h.handleSubscribe(data, addr, conn)
 	case protocol.PacketTypeQualityReport:
 		h.handleQualityReport(data, addr, conn)
+	case protocol.PacketTypeQualityPref:
+		h.handleQualityPref(data, addr, conn)
 	}
 }
 
@@ -118,8 +121,10 @@ func (h *Handler) handleHello(data []byte, addr *net.UDPAddr, conn *net.UDPConn)
 		return
 	}
 
+	isObserver := hello.Observer
+
 	var sessionCrypto *crypto.SessionCrypto
-	if hello.Crypto != nil && len(hello.Crypto.KeyMaterial) == crypto.KeySize {
+	if !isObserver && hello.Crypto != nil && len(hello.Crypto.KeyMaterial) == crypto.KeySize {
 		var keyID uint8
 		if len(hello.Crypto.KeyID) > 0 {
 			keyID = hello.Crypto.KeyID[0]
@@ -128,16 +133,25 @@ func (h *Handler) handleHello(data []byte, addr *net.UDPAddr, conn *net.UDPConn)
 	}
 
 	if existing := h.sessionManager.GetSessionByUserInRoom(claims.UserID, claims.RoomID); existing != nil {
-		h.sessionManager.RemoveSession(existing.ID)
-		h.broadcastParticipantLeft(claims.RoomID, existing.UserID, existing.SSRC, existing.VideoSSRC, existing.ScreenSSRC, conn)
+		if existing.IsObserver && !isObserver {
+			h.sessionManager.RemoveSession(existing.ID)
+		} else if !existing.IsObserver && isObserver {
+			h.sendWelcomeForObserver(claims, existing, addr, conn)
+			return
+		} else {
+			h.sessionManager.RemoveSession(existing.ID)
+			if !isObserver {
+				h.broadcastParticipantLeft(claims.RoomID, existing.UserID, existing.SSRC, existing.VideoSSRC, existing.ScreenSSRC, conn)
+			}
+		}
 	}
 
 	existingSessions := h.sessionManager.GetRoomSessions(claims.RoomID)
-	sess := h.sessionManager.CreateSession(claims.UserID, claims.RoomID, addr, sessionCrypto, hello.VideoEnabled)
+	sess := h.sessionManager.CreateSession(claims.UserID, claims.RoomID, addr, sessionCrypto, hello.VideoEnabled, isObserver)
 
 	participants := make([]protocol.ParticipantInfo, 0, len(existingSessions))
 	for _, s := range existingSessions {
-		if s == nil {
+		if s == nil || s.IsObserver {
 			continue
 		}
 		quality, rttMs, packetLoss, jitterMs := s.SnapshotQuality()
@@ -167,29 +181,84 @@ func (h *Handler) handleHello(data []byte, addr *net.UDPAddr, conn *net.UDPConn)
 		ScreenSSRC:     sess.ScreenSSRC,
 		PingIntervalMs: 5000,
 		RRIntervalMs:   250,
+		Observer:       isObserver,
 		Participants:   participants,
 	}
 	out, err := protocol.BuildJSONPacket(protocol.PacketTypeWelcome, welcome)
 	if err != nil {
-		h.logger.Warn("failed to marshal welcome", zap.Error(err))
 		return
 	}
 	if err := h.send(out, addr, conn); err != nil {
-		h.logger.Warn("failed to send welcome", zap.Error(err))
 		return
 	}
 	if h.metrics != nil {
 		h.metrics.RecordWelcome()
 	}
 
-	h.broadcastJoined(claims.RoomID, sess, conn)
+	if !isObserver {
+		h.broadcastJoined(claims.RoomID, sess, conn)
+	}
+
 	h.logger.Info("session created",
 		zap.String("user_id", claims.UserID),
 		zap.String("room_id", claims.RoomID),
 		zap.Uint32("ssrc", sess.SSRC),
-		zap.Uint32("video_ssrc", sess.VideoSSRC),
-		zap.Uint32("screen_ssrc", sess.ScreenSSRC),
+		zap.Bool("observer", isObserver),
 	)
+}
+
+func (h *Handler) sendWelcomeForObserver(claims *jwt.Claims, existingActive *session.Session, addr *net.UDPAddr, conn *net.UDPConn) {
+	existingSessions := h.sessionManager.GetRoomSessions(claims.RoomID)
+	participants := make([]protocol.ParticipantInfo, 0)
+	for _, s := range existingSessions {
+		if s == nil || s.IsObserver {
+			continue
+		}
+		quality, rttMs, packetLoss, jitterMs := s.SnapshotQuality()
+		participants = append(participants, protocol.ParticipantInfo{
+			UserID:        s.UserID,
+			SSRC:          s.SSRC,
+			VideoSSRC:     s.VideoSSRC,
+			ScreenSSRC:    s.ScreenSSRC,
+			Muted:         s.Muted,
+			VideoEnabled:  s.VideoEnabled,
+			ScreenSharing: s.ScreenSharing,
+			Speaking:      s.Speaking,
+			Quality:       quality,
+			RTTMs:         rttMs,
+			PacketLoss:    packetLoss,
+			JitterMs:      jitterMs,
+		})
+	}
+	welcome := protocol.WelcomePayload{
+		Protocol:       protocol.ProtocolVersion,
+		SessionID:      existingActive.ID,
+		RoomID:         claims.RoomID,
+		UserID:         claims.UserID,
+		SSRC:           existingActive.SSRC,
+		VideoSSRC:      existingActive.VideoSSRC,
+		ScreenSSRC:     existingActive.ScreenSSRC,
+		PingIntervalMs: 5000,
+		Observer:       false,
+		Participants:   participants,
+	}
+	out, _ := protocol.BuildJSONPacket(protocol.PacketTypeWelcome, welcome)
+	_ = h.send(out, addr, conn)
+}
+
+func (h *Handler) handleQualityPref(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {
+	sess := h.sessionManager.GetByAddr(addr)
+	if sess == nil {
+		return
+	}
+	var payload protocol.QualityPrefPayload
+	if err := json.Unmarshal(data[1:], &payload); err != nil {
+		return
+	}
+	h.sessionManager.Touch(sess.ID)
+	for _, entry := range payload.Prefs {
+		sess.SetQualityPref(entry.SSRC, entry.Tier)
+	}
 }
 
 func (h *Handler) handlePing(data []byte, addr *net.UDPAddr, conn *net.UDPConn) {

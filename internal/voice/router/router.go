@@ -159,7 +159,7 @@ func (r *Router) routeMedia(h protocol.MediaHeader, raw []byte, owner PacketOwne
 	senderID := sender.ID
 	routed := 0
 	for _, dst := range sessions {
-		if dst == nil || dst.ID == senderID {
+		if dst == nil || dst.ID == senderID || dst.IsObserver {
 			continue
 		}
 		to := dst.GetAddr()
@@ -169,6 +169,14 @@ func (r *Router) routeMedia(h protocol.MediaHeader, raw []byte, owner PacketOwne
 		if !dst.IsSubscribedTo(h.SSRC) {
 			continue
 		}
+
+		if h.Type == protocol.PacketTypeVideo {
+			desiredTier, hasPref := dst.GetQualityPref(h.SSRC)
+			if hasPref && h.Layer != desiredTier {
+				continue
+			}
+		}
+
 		qi := workerIndexFor(dst.SSRC, r.numWorkers)
 		if r.enqueue(qi, raw, owner, to, conn, false) {
 			routed++

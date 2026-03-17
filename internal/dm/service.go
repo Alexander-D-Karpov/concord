@@ -457,7 +457,7 @@ func (s *Service) StartCall(ctx context.Context, channelID string, audioOnly boo
 		return nil, "", errors.Conflict("call already active")
 	}
 
-	assignment, err := s.voiceAssign.AssignToVoice(ctx, channelID, userUUID.String(), audioOnly)
+	assignment, err := s.voiceAssign.AssignToVoice(ctx, channelID, userUUID.String(), "", audioOnly)
 	if err != nil {
 		return nil, "", errors.Internal("failed to assign voice server", err)
 	}
@@ -493,7 +493,7 @@ func (s *Service) JoinCall(ctx context.Context, channelID string, audioOnly bool
 		return assignment, []voiceassign.VoiceParticipant{}, nil
 	}
 
-	assignment, err := s.voiceAssign.AssignToVoice(ctx, channelID, userUUID.String(), audioOnly)
+	assignment, err := s.voiceAssign.AssignToVoice(ctx, channelID, userUUID.String(), "", audioOnly)
 	if err != nil {
 		return nil, nil, errors.Internal("failed to assign voice server", err)
 	}

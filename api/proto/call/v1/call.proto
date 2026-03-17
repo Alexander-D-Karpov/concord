@@ -10,7 +10,7 @@ import "google/protobuf/timestamp.proto";
 message JoinVoiceRequest {
   string room_id = 1;
   bool audio_only = 2;
-  string preferred_region = 3;
+  string region = 3;
 }
 
 message UdpEndpoint {

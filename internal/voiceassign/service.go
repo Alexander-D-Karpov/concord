@@ -134,7 +134,7 @@ func (s *Service) cryptoCacheKey(roomID string) string {
 	return "voice:crypto:" + roomID
 }
 
-func (s *Service) AssignToVoice(ctx context.Context, roomID, userID string, audioOnly bool) (*VoiceAssignmentResult, error) {
+func (s *Service) AssignToVoice(ctx context.Context, roomID, userID, region string, audioOnly bool) (*VoiceAssignmentResult, error) {
 	roomUUID, err := uuid.Parse(roomID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid room_id: %w", err)
@@ -152,14 +152,14 @@ func (s *Service) AssignToVoice(ctx context.Context, roomID, userID string, audi
 	if roomVoiceServerID != nil {
 		server, err = s.getServerByID(ctx, *roomVoiceServerID)
 		if err != nil {
-			server, err = s.getBestServer(ctx, "")
+			server, err = s.getBestServer(ctx, region)
 			if err != nil {
 				return nil, err
 			}
 			s.migrateRoomParticipants(ctx, roomID, server.ID.String())
 		}
 	} else {
-		server, err = s.getBestServer(ctx, "")
+		server, err = s.getBestServer(ctx, region)
 		if err != nil {
 			return nil, err
 		}
@@ -263,7 +263,7 @@ func (s *Service) StartHealthChecker(ctx context.Context, interval time.Duration
 	}
 }
 
-func (s *Service) AssignToDMCall(ctx context.Context, channelID, userID string, audioOnly bool) (*VoiceAssignmentResult, error) {
+func (s *Service) AssignToDMCall(ctx context.Context, channelID, userID, region string, audioOnly bool) (*VoiceAssignmentResult, error) {
 	channelUUID, err := uuid.Parse(channelID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid channel_id: %w", err)
@@ -280,7 +280,7 @@ func (s *Service) AssignToDMCall(ctx context.Context, channelID, userID string, 
 		return nil, fmt.Errorf("dm channel not found")
 	}
 
-	server, err := s.getBestServer(ctx, "")
+	server, err := s.getBestServer(ctx, region)
 	if err != nil {
 		return nil, err
 	}

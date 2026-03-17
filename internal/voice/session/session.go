@@ -26,8 +26,10 @@ type Session struct {
 	VideoEnabled  bool
 	ScreenSharing bool
 	Speaking      bool
+	IsObserver    bool
 
 	Subscriptions map[uint32]bool
+	QualityPrefs  map[uint32]uint8
 
 	LastQuality    int
 	LastRTTMs      float64
@@ -199,15 +201,6 @@ func (s *Session) UpdateSubscriptions(subs []uint32) {
 	}
 }
 
-func (s *Session) IsSubscribedTo(ssrc uint32) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.Subscriptions == nil {
-		return true
-	}
-	return s.Subscriptions[ssrc]
-}
-
 type RetransmitBuffer struct {
 	mu      sync.RWMutex
 	packets map[uint16]*CachedPacket
@@ -306,19 +299,23 @@ func NewManager() *Manager {
 
 func userRoomKey(userID, roomID string) string { return userID + ":" + roomID }
 
-func (m *Manager) CreateSession(userID, roomID string, addr *net.UDPAddr, sessionCrypto *crypto.SessionCrypto, videoEnabled bool) *Session {
+func (m *Manager) CreateSession(userID, roomID string, addr *net.UDPAddr, sessionCrypto *crypto.SessionCrypto, videoEnabled bool, observer bool) *Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	now := time.Now()
 	sessionID := m.nextID
 	m.nextID++
-	audioSSRC := m.nextSSRC
-	m.nextSSRC++
-	videoSSRC := m.nextSSRC
-	m.nextSSRC++
-	screenSSRC := m.nextSSRC
-	m.nextSSRC++
+
+	var audioSSRC, videoSSRC, screenSSRC uint32
+	if !observer {
+		audioSSRC = m.nextSSRC
+		m.nextSSRC++
+		videoSSRC = m.nextSSRC
+		m.nextSSRC++
+		screenSSRC = m.nextSSRC
+		m.nextSSRC++
+	}
 
 	sess := &Session{
 		ID:             sessionID,
@@ -332,6 +329,7 @@ func (m *Manager) CreateSession(userID, roomID string, addr *net.UDPAddr, sessio
 		lastActivity:   now,
 		Crypto:         sessionCrypto,
 		VideoEnabled:   videoEnabled,
+		IsObserver:     observer,
 		retransmitBufs: make(map[uint32]*RetransmitBuffer),
 	}
 
@@ -346,9 +344,11 @@ func (m *Manager) CreateSession(userID, roomID string, addr *net.UDPAddr, sessio
 	room.sessions[sessionID] = sess
 	room.rebuildSnapshotLocked()
 
-	m.ssrcMap[audioSSRC] = sess
-	m.ssrcMap[videoSSRC] = sess
-	m.ssrcMap[screenSSRC] = sess
+	if audioSSRC > 0 {
+		m.ssrcMap[audioSSRC] = sess
+		m.ssrcMap[videoSSRC] = sess
+		m.ssrcMap[screenSSRC] = sess
+	}
 	if sess.addr != nil {
 		m.addrMap[udpAddrKey(sess.addr)] = sess
 	}
@@ -498,4 +498,32 @@ func (m *Manager) GetActiveSessions(activeWithin time.Duration) []*Session {
 		}
 	}
 	return out
+}
+
+func (s *Session) SetQualityPref(ssrc uint32, tier uint8) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.QualityPrefs == nil {
+		s.QualityPrefs = make(map[uint32]uint8)
+	}
+	s.QualityPrefs[ssrc] = tier
+}
+
+func (s *Session) GetQualityPref(ssrc uint32) (uint8, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.QualityPrefs == nil {
+		return 3, false
+	}
+	tier, ok := s.QualityPrefs[ssrc]
+	return tier, ok
+}
+
+func (s *Session) IsSubscribedTo(ssrc uint32) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.Subscriptions == nil {
+		return !s.IsObserver
+	}
+	return s.Subscriptions[ssrc]
 }

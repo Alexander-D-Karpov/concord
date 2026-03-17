@@ -40,6 +40,13 @@ const (
 	CodecOpus = 1
 	CodecH264 = 2
 	CodecVP8  = 3
+	CodecVP9  = 4
+	CodecAV1  = 5
+
+	LayerThumbnail = 0
+	LayerSmall     = 1
+	LayerMedium    = 2
+	LayerLarge     = 3
 )
 
 var (
@@ -56,6 +63,7 @@ type MediaHeader struct {
 	Timestamp uint32
 	SSRC      uint32
 	Counter   uint64
+	Layer     uint8
 }
 
 type FragmentHeader struct {
@@ -77,7 +85,6 @@ func ParseMediaHeader(data []byte) (*MediaHeader, error) {
 	if len(data) < MediaHeaderSize {
 		return nil, ErrTooSmall
 	}
-
 	return &MediaHeader{
 		Type:      data[0],
 		Flags:     data[1],
@@ -87,6 +94,7 @@ func ParseMediaHeader(data []byte) (*MediaHeader, error) {
 		Timestamp: binary.BigEndian.Uint32(data[6:10]),
 		SSRC:      binary.BigEndian.Uint32(data[10:14]),
 		Counter:   binary.BigEndian.Uint64(data[14:22]),
+		Layer:     data[22],
 	}, nil
 }
 
@@ -100,7 +108,8 @@ func (h *MediaHeader) Marshal() []byte {
 	binary.BigEndian.PutUint32(buf[6:10], h.Timestamp)
 	binary.BigEndian.PutUint32(buf[10:14], h.SSRC)
 	binary.BigEndian.PutUint64(buf[14:22], h.Counter)
-	binary.BigEndian.PutUint16(buf[22:24], 0)
+	buf[22] = h.Layer
+	buf[23] = 0
 	return buf
 }
 
@@ -199,6 +208,15 @@ func (p *Packet) GetRoomIDString() string {
 	return aux.RoomID
 }
 
+type QualityPrefPayload struct {
+	Prefs []QualityPrefEntry `json:"prefs"`
+}
+
+type QualityPrefEntry struct {
+	SSRC uint32 `json:"ssrc"`
+	Tier uint8  `json:"tier"`
+}
+
 type HelloPayload struct {
 	Token        string      `json:"token"`
 	Protocol     uint8       `json:"protocol"`
@@ -207,14 +225,9 @@ type HelloPayload struct {
 	UserID       string      `json:"user_id,omitempty"`
 	VideoEnabled bool        `json:"video_enabled,omitempty"`
 	VideoCodec   string      `json:"video_codec,omitempty"`
+	Observer     bool        `json:"observer,omitempty"`
+	Region       string      `json:"region,omitempty"`
 	Crypto       *CryptoInfo `json:"crypto,omitempty"`
-}
-
-type CryptoInfo struct {
-	AEAD        string `json:"aead,omitempty"`
-	KeyID       []byte `json:"key_id,omitempty"`
-	KeyMaterial []byte `json:"key_material,omitempty"`
-	NonceBase   []byte `json:"nonce_base,omitempty"`
 }
 
 type WelcomePayload struct {
@@ -227,7 +240,15 @@ type WelcomePayload struct {
 	ScreenSSRC     uint32            `json:"screen_ssrc,omitempty"`
 	PingIntervalMs uint32            `json:"ping_interval_ms,omitempty"`
 	RRIntervalMs   uint32            `json:"rr_interval_ms,omitempty"`
+	Observer       bool              `json:"observer,omitempty"`
 	Participants   []ParticipantInfo `json:"participants"`
+}
+
+type CryptoInfo struct {
+	AEAD        string `json:"aead,omitempty"`
+	KeyID       []byte `json:"key_id,omitempty"`
+	KeyMaterial []byte `json:"key_material,omitempty"`
+	NonceBase   []byte `json:"nonce_base,omitempty"`
 }
 
 type ParticipantInfo struct {

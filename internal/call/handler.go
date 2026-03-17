@@ -39,6 +39,8 @@ func (h *Handler) JoinVoice(ctx context.Context, req *callv1.JoinVoiceRequest) (
 		return nil, errors.ToGRPCError(errors.Unauthorized("user not authenticated"))
 	}
 
+	region := req.GetRegion()
+
 	roomUUID, err := uuid.Parse(req.RoomId)
 	if err != nil {
 		return nil, errors.ToGRPCError(errors.BadRequest("invalid room id"))
@@ -57,7 +59,7 @@ func (h *Handler) JoinVoice(ctx context.Context, req *callv1.JoinVoiceRequest) (
 		return nil, errors.ToGRPCError(errors.Forbidden("not a member of this room"))
 	}
 
-	assignment, err := h.voiceAssign.AssignToVoice(ctx, req.RoomId, userID, req.AudioOnly)
+	assignment, err := h.voiceAssign.AssignToVoice(ctx, req.RoomId, userID, region, req.AudioOnly)
 	if err != nil {
 		h.logger.Error("failed to assign voice server",
 			zap.String("room_id", req.RoomId),
