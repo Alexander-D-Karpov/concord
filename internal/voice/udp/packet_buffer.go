@@ -12,12 +12,12 @@ type packetBuffer struct {
 	pool *sync.Pool
 }
 
-func newPacketPool() sync.Pool {
-	p := sync.Pool{}
+func newPacketPool() *sync.Pool {
+	p := &sync.Pool{}
 	p.New = func() interface{} {
 		return &packetBuffer{
 			buf:  make([]byte, maxPacketLen),
-			pool: &p,
+			pool: p,
 		}
 	}
 	return p

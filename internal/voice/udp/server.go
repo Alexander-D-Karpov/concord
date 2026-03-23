@@ -23,7 +23,7 @@ type Server struct {
 	stopChan chan struct{}
 	wg       sync.WaitGroup
 
-	packetPool sync.Pool
+	packetPool *sync.Pool
 	workChan   chan *packetJob
 }
 

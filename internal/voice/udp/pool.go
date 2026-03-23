@@ -25,7 +25,7 @@ type ServerPool struct {
 	metrics *telemetry.Metrics
 
 	workChan   chan *poolJob
-	packetPool sync.Pool
+	packetPool *sync.Pool
 	stopChan   chan struct{}
 	wg         sync.WaitGroup
 }

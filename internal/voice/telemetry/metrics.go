@@ -120,10 +120,10 @@ func (m *Metrics) Start(ctx context.Context, port int, path string) error {
 func (m *Metrics) handleProm(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	p := func(name, help, typ string, val uint64) {
-		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", name, help, name, typ, name, val)
+		_, _ = fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", name, help, name, typ, name, val)
 	}
 	g := func(name, help string, val int32) {
-		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s %d\n", name, help, name, name, val)
+		_, _ = fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s %d\n", name, help, name, name, val)
 	}
 	p("voice_packets_received_total", "Total packets received", "counter", m.PacketsReceived.Load())
 	p("voice_packets_sent_total", "Total packets sent", "counter", m.PacketsSent.Load())
@@ -155,12 +155,12 @@ func (m *Metrics) handleProm(w http.ResponseWriter, r *http.Request) {
 	for i, b := range m.rttHist.buckets {
 		cum += b
 		if i < len(m.rttHist.bounds) {
-			fmt.Fprintf(w, "voice_rtt_ms_bucket{le=\"%.0f\"} %d\n", m.rttHist.bounds[i], cum)
+			_, _ = fmt.Fprintf(w, "voice_rtt_ms_bucket{le=\"%.0f\"} %d\n", m.rttHist.bounds[i], cum)
 		} else {
-			fmt.Fprintf(w, "voice_rtt_ms_bucket{le=\"+Inf\"} %d\n", cum)
+			_, _ = fmt.Fprintf(w, "voice_rtt_ms_bucket{le=\"+Inf\"} %d\n", cum)
 		}
 	}
-	fmt.Fprintf(w, "voice_rtt_ms_sum %f\nvoice_rtt_ms_count %d\n", m.rttHist.sum, m.rttHist.count)
+	_, _ = fmt.Fprintf(w, "voice_rtt_ms_sum %f\nvoice_rtt_ms_count %d\n", m.rttHist.sum, m.rttHist.count)
 	m.rttHist.mu.Unlock()
 }
 
