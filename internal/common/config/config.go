@@ -3,7 +3,10 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/Alexander-D-Karpov/concord/internal/auth/oauth"
 )
 
 // Config is the fully assembled application configuration, grouping each
@@ -56,7 +59,10 @@ type AuthConfig struct {
 	RefreshExpiration  time.Duration
 	VoiceJWTSecret     string
 	VoiceJWTExpiration time.Duration
-	OAuth              map[string]OAuthProvider
+	// OAuth holds the configured provider credentials keyed by provider name. A
+	// provider appears here only when its client-ID env var is set; the static
+	// catalog (endpoints, scopes, display metadata) lives in oauth.Registry.
+	OAuth map[string]oauth.Credentials
 	// LoginMaxAttempts is the number of failed password logins per identifier
 	// (within LoginAttemptWindow) that trips a lockout; <= 0 disables lockout.
 	LoginMaxAttempts int
@@ -64,17 +70,6 @@ type AuthConfig struct {
 	LoginLockoutPeriod time.Duration
 	// LoginAttemptWindow is the sliding window over which failures are counted.
 	LoginAttemptWindow time.Duration
-}
-
-// OAuthProvider holds the client credentials and endpoint URLs for a single
-// OAuth2 identity provider (e.g. Google, GitHub).
-type OAuthProvider struct {
-	ClientID     string
-	ClientSecret string
-	RedirectURL  string
-	AuthURL      string
-	TokenURL     string
-	UserInfoURL  string
 }
 
 // VoiceConfig holds the voice server's UDP/TCP listener settings, region and
@@ -259,35 +254,40 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// loadOAuthProviders returns the OAuth providers whose client-ID env var is set,
-// keyed by provider name ("google", "github"). Providers without a configured
-// client ID are omitted, so an empty map means OAuth is effectively disabled.
-func loadOAuthProviders() map[string]OAuthProvider {
-	providers := make(map[string]OAuthProvider)
-
-	if clientID := getEnv("OAUTH_GOOGLE_CLIENT_ID", ""); clientID != "" {
-		providers["google"] = OAuthProvider{
+// loadOAuthProviders iterates oauth.Registry and returns credentials for every
+// provider whose <PREFIX>_CLIENT_ID env var is set, keyed by provider name. A
+// provider without a configured client ID is omitted, so an empty map means OAuth
+// is effectively disabled. <PREFIX>_REDIRECT_URL is a comma-separated exact-match
+// allowlist (loopback redirects are always permitted in addition).
+func loadOAuthProviders() map[string]oauth.Credentials {
+	providers := make(map[string]oauth.Credentials)
+	for _, def := range oauth.Registry {
+		idKey, secretKey, redirectKey := def.EnvKeys()
+		clientID := getEnv(idKey, "")
+		if clientID == "" {
+			continue
+		}
+		providers[def.Name] = oauth.Credentials{
 			ClientID:     clientID,
-			ClientSecret: getEnv("OAUTH_GOOGLE_CLIENT_SECRET", ""),
-			RedirectURL:  getEnv("OAUTH_GOOGLE_REDIRECT_URL", ""),
-			AuthURL:      "https://accounts.google.com/o/oauth2/auth",
-			TokenURL:     "https://oauth2.googleapis.com/token",
-			UserInfoURL:  "https://www.googleapis.com/oauth2/v2/userinfo",
+			ClientSecret: getEnv(secretKey, ""),
+			RedirectURLs: splitList(getEnv(redirectKey, "")),
 		}
 	}
-
-	if clientID := getEnv("OAUTH_GITHUB_CLIENT_ID", ""); clientID != "" {
-		providers["github"] = OAuthProvider{
-			ClientID:     clientID,
-			ClientSecret: getEnv("OAUTH_GITHUB_CLIENT_SECRET", ""),
-			RedirectURL:  getEnv("OAUTH_GITHUB_REDIRECT_URL", ""),
-			AuthURL:      "https://github.com/login/oauth/authorize",
-			TokenURL:     "https://github.com/login/oauth/access_token",
-			UserInfoURL:  "https://api.github.com/user",
-		}
-	}
-
 	return providers
+}
+
+// splitList splits a comma-separated env value into trimmed, non-empty entries.
+func splitList(v string) []string {
+	if v == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // getEnv returns the value of environment variable key, or fallback if it is

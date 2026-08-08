@@ -2,6 +2,11 @@ package auth
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Alexander-D-Karpov/concord/internal/auth/jwt"
@@ -14,6 +19,29 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// oauthStateTTL bounds how long an in-flight OAuth login (state → PKCE verifier)
+// stays valid between OAuthBegin and the code exchange.
+const oauthStateTTL = 10 * time.Minute
+
+// oauthFlowState is the server-side record for one in-flight OAuth login, stored
+// in Redis under the opaque state value and consumed once at exchange.
+type oauthFlowState struct {
+	Provider    string `json:"provider"`
+	RedirectURI string `json:"redirect_uri"`
+	Verifier    string `json:"verifier"`
+}
+
+// AuthMethod is a login option advertised to clients by ListAuthMethods.
+type AuthMethod struct {
+	ID          string
+	Type        string
+	DisplayName string
+	Icon        string
+	BeginPath   string
+}
+
+func oauthStateKey(state string) string { return "oauth:state:" + state }
 
 // Service implements the authentication business logic: registration, password
 // and OAuth login, and token issue/refresh/revoke. It depends on the users
@@ -28,6 +56,23 @@ type Service struct {
 	lockout    *LockoutManager
 	accessTTL  time.Duration
 	refreshTTL time.Duration
+
+	// Avatar ingestion for OAuth signups (optional; enabled via SetAvatarIngestion).
+	avatarStorePath string
+	avatarStoreURL  string
+	httpClient      *http.Client
+}
+
+// SetAvatarIngestion enables downloading an OAuth provider's profile picture on
+// first login and storing it in local avatar storage (same pipeline as uploaded
+// avatars), so the account's avatar is served by Concord rather than linking to an
+// external URL. When left unset, OAuth signups get no avatar.
+func (s *Service) SetAvatarIngestion(storagePath, storageURL string) {
+	s.avatarStorePath = storagePath
+	s.avatarStoreURL = storageURL
+	if s.httpClient == nil {
+		s.httpClient = &http.Client{Timeout: 15 * time.Second}
+	}
 }
 
 // Tokens is the credential set returned to a client on successful auth. ExpiresIn
@@ -200,38 +245,133 @@ func (s *Service) RevokeRefreshToken(ctx context.Context, refreshToken string) e
 	return err
 }
 
-// BeginOAuth returns the provider authorization URL and a CSRF state value the
-// client must echo back on callback. It returns BadRequest if OAuth is unconfigured.
+// ListAuthMethods returns the login methods the server currently offers: password
+// first, then every OAuth provider that is configured and available.
+func (s *Service) ListAuthMethods() []AuthMethod {
+	methods := []AuthMethod{
+		{ID: "password", Type: "password", DisplayName: "Password"},
+	}
+	if s.oauth != nil {
+		for _, p := range s.oauth.Available() {
+			methods = append(methods, AuthMethod{
+				ID:          p.Name,
+				Type:        "oauth",
+				DisplayName: p.DisplayName,
+				Icon:        p.Icon,
+				BeginPath:   "/v1/auth/oauth/begin",
+			})
+		}
+	}
+	return methods
+}
+
+// BeginOAuth starts a PKCE authorization-code login. It generates a state and a
+// PKCE verifier, persists {provider, redirectURI, verifier} in Redis under the
+// state (single-use, oauthStateTTL), and returns the provider authorization URL
+// (carrying the S256 challenge) plus the state the client must echo back. Errors
+// are BadRequest when OAuth/Redis is unavailable, the provider is unavailable, or
+// the redirect URI is not allowed.
 func (s *Service) BeginOAuth(ctx context.Context, provider, redirectURI string) (string, string, error) {
 	if s.oauth == nil {
 		return "", "", apperr.BadRequest("OAuth not configured")
 	}
-	return s.oauth.GetAuthURL(provider, redirectURI)
+	if s.cache == nil {
+		return "", "", apperr.BadRequest("OAuth requires Redis, which is disabled")
+	}
+	if !s.oauth.IsAvailable(provider) {
+		return "", "", apperr.BadRequest("OAuth provider not available")
+	}
+	if redirectURI == "" {
+		redirectURI = s.oauth.DefaultRedirect(provider)
+	}
+	if redirectURI == "" {
+		return "", "", apperr.BadRequest("redirect_uri is required")
+	}
+	if !s.oauth.RedirectAllowed(provider, redirectURI) {
+		return "", "", apperr.BadRequest("redirect_uri is not allowed")
+	}
+
+	state := oauth.GenerateState()
+	if state == "" {
+		return "", "", apperr.Internal("failed to generate state", nil)
+	}
+	verifier := oauth.GenerateVerifier()
+
+	authURL, err := s.oauth.BuildAuthURL(provider, redirectURI, state, verifier)
+	if err != nil {
+		return "", "", apperr.BadRequest(err.Error())
+	}
+
+	fs := oauthFlowState{Provider: provider, RedirectURI: redirectURI, Verifier: verifier}
+	if err := s.cache.Set(ctx, oauthStateKey(state), fs, oauthStateTTL); err != nil {
+		return "", "", apperr.Internal("failed to persist oauth state", err)
+	}
+	return authURL, state, nil
 }
 
-// CompleteOAuth exchanges the authorization code for provider user info and returns
-// a token pair. If no local user is linked to that provider identity it lazily
-// creates one (using the provider email as handle). Returns BadRequest if OAuth is
-// unconfigured. The caller is responsible for having verified the CSRF state first.
-func (s *Service) CompleteOAuth(ctx context.Context, provider, code, redirectURI string) (*Tokens, error) {
+// CompleteOAuth finishes a PKCE login. It looks up and consumes the state (one
+// time), verifies it was issued for this provider and redirect URI, exchanges the
+// code (with the stored verifier) for the provider profile, then finds or lazily
+// creates the linked account and issues a token pair. A missing/expired/replayed
+// state or a failed exchange is Unauthorized.
+func (s *Service) CompleteOAuth(ctx context.Context, provider, code, state, redirectURI string) (*Tokens, error) {
 	if s.oauth == nil {
 		return nil, apperr.BadRequest("OAuth not configured")
 	}
+	if s.cache == nil {
+		return nil, apperr.BadRequest("OAuth requires Redis, which is disabled")
+	}
+	if state == "" {
+		return nil, apperr.Unauthorized("missing oauth state")
+	}
 
-	userInfo, err := s.oauth.ExchangeCode(ctx, provider, code, redirectURI)
+	var fs oauthFlowState
+	if err := s.cache.Get(ctx, oauthStateKey(state), &fs); err != nil {
+		return nil, apperr.Unauthorized("invalid or expired oauth state")
+	}
+	// Consume the state regardless of the outcome so it cannot be replayed.
+	_ = s.cache.Delete(ctx, oauthStateKey(state))
+
+	if fs.Provider != provider {
+		return nil, apperr.Unauthorized("oauth state provider mismatch")
+	}
+	if redirectURI != "" && fs.RedirectURI != redirectURI {
+		return nil, apperr.Unauthorized("oauth state redirect mismatch")
+	}
+
+	userInfo, err := s.oauth.Exchange(ctx, provider, code, fs.RedirectURI, fs.Verifier)
 	if err != nil {
-		return nil, apperr.Internal("OAuth exchange failed", err)
+		return nil, apperr.Unauthorized("oauth exchange failed")
 	}
 
 	user, err := s.usersRepo.GetByOAuth(ctx, provider, userInfo.ID)
 	if err != nil {
+		if !apperr.IsNotFound(err) {
+			return nil, apperr.Internal("failed to look up oauth user", err)
+		}
+		handle, herr := s.uniqueHandle(ctx, userInfo.Email, userInfo.Name)
+		if herr != nil {
+			return nil, apperr.Internal("failed to allocate handle", herr)
+		}
+		displayName := userInfo.Name
+		if displayName == "" {
+			displayName = handle
+		}
 		user = &users.User{
 			ID:            uuid.New(),
-			Handle:        userInfo.Email,
-			DisplayName:   userInfo.Name,
-			AvatarURL:     userInfo.Picture,
+			Handle:        handle,
+			DisplayName:   displayName,
 			OAuthProvider: &provider,
 			OAuthSubject:  &userInfo.ID,
+		}
+		// Best-effort: ingest the provider avatar into local storage so it is served
+		// by Concord rather than linked externally. On any failure the account is
+		// still created, just without an avatar.
+		if userInfo.Picture != "" && s.avatarStorePath != "" {
+			if full, thumb, ierr := s.ingestAvatar(ctx, user.ID.String(), userInfo.Picture); ierr == nil {
+				user.AvatarURL = full
+				user.AvatarThumbnailURL = thumb
+			}
 		}
 		if err := s.usersRepo.Create(ctx, user); err != nil {
 			return nil, apperr.Internal("failed to create user", err)
@@ -239,6 +379,97 @@ func (s *Service) CompleteOAuth(ctx context.Context, provider, code, redirectURI
 	}
 
 	return s.issueTokens(ctx, user)
+}
+
+// uniqueHandle derives a valid, unused handle from the email local-part (falling
+// back to name, then "user") and appends a numeric suffix until it finds one no
+// account holds. It keeps candidates within the 3-32 char handle limit.
+func (s *Service) uniqueHandle(ctx context.Context, email, name string) (string, error) {
+	base := sanitizeHandle(email)
+	if base == "" {
+		base = sanitizeHandle(name)
+	}
+	if base == "" {
+		base = "user"
+	}
+
+	candidate := base
+	for i := 2; i < 100000; i++ {
+		_, err := s.usersRepo.GetByHandle(ctx, candidate)
+		if err != nil {
+			if apperr.IsNotFound(err) {
+				return candidate, nil
+			}
+			return "", err
+		}
+		suffix := strconv.Itoa(i)
+		trimmed := base
+		if max := 32 - len(suffix); len(trimmed) > max {
+			trimmed = trimmed[:max]
+		}
+		candidate = trimmed + suffix
+	}
+	return "", fmt.Errorf("could not allocate unique handle for %q", base)
+}
+
+// sanitizeHandle reduces s to a candidate handle: the part before any "@",
+// lowercased, keeping only [a-z0-9_.-] and clamped to 32 chars. It returns "" when
+// the result is shorter than the 3-char minimum so the caller can fall back.
+func sanitizeHandle(s string) string {
+	if i := strings.IndexByte(s, '@'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.ToLower(s)
+
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '.' || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	if len(out) > 32 {
+		out = out[:32]
+	}
+	if len(out) < 3 {
+		return ""
+	}
+	return out
+}
+
+// ingestAvatar downloads the provider profile image at imageURL, runs it through
+// the shared avatar pipeline (validate, downscale, re-encode as full + thumbnail
+// JPEGs, stripping metadata), stores the files under the avatar storage path, and
+// returns their public URLs. The download size is bounded; it is best-effort, so
+// callers ignore the error and simply leave the avatar unset on failure.
+func (s *Service) ingestAvatar(ctx context.Context, userID, imageURL string) (string, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imageURL, nil)
+	if err != nil {
+		return "", "", err
+	}
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("avatar fetch failed: %s", resp.Status)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, users.MaxAvatarBytes+1))
+	if err != nil {
+		return "", "", err
+	}
+
+	processed, err := users.ProcessAvatarImage(data)
+	if err != nil {
+		return "", "", err
+	}
+	fullRel, thumbRel, err := users.SaveAvatarFiles(s.avatarStorePath, userID, processed.FullData, processed.ThumbData)
+	if err != nil {
+		return "", "", err
+	}
+	return s.avatarStoreURL + "/" + fullRel, s.avatarStoreURL + "/" + thumbRel, nil
 }
 
 // issueTokens generates an access/refresh pair for the user, persists the refresh

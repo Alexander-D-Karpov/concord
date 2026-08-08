@@ -21,6 +21,24 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+// ListAuthMethods handles the ListAuthMethods RPC, returning the login methods the
+// server currently offers (password plus any available OAuth providers). It is
+// public so clients can render the login screen before authenticating.
+func (h *Handler) ListAuthMethods(_ context.Context, _ *authv1.ListAuthMethodsRequest) (*authv1.ListAuthMethodsResponse, error) {
+	methods := h.svc.ListAuthMethods()
+	out := make([]*authv1.AuthMethod, 0, len(methods))
+	for _, m := range methods {
+		out = append(out, &authv1.AuthMethod{
+			Id:          m.ID,
+			Type:        m.Type,
+			DisplayName: m.DisplayName,
+			Icon:        m.Icon,
+			BeginPath:   m.BeginPath,
+		})
+	}
+	return &authv1.ListAuthMethodsResponse{Methods: out}, nil
+}
+
 // Register handles the Register RPC: it requires handle and password, defaults the
 // display name to the handle when empty, and returns a Bearer token pair.
 func (h *Handler) Register(ctx context.Context, req *authv1.RegisterRequest) (*authv1.Token, error) {
@@ -119,13 +137,14 @@ func (h *Handler) OAuthBegin(ctx context.Context, req *authv1.OAuthBeginRequest)
 }
 
 // LoginOAuth handles the LoginOAuth RPC, completing the OAuth code exchange and
-// returning a Bearer token pair. Requires provider and code.
+// returning a Bearer token pair. Requires provider, code, and the state issued by
+// OAuthBegin.
 func (h *Handler) LoginOAuth(ctx context.Context, req *authv1.LoginOAuthRequest) (*authv1.Token, error) {
-	if req.GetProvider() == "" || req.GetCode() == "" {
-		return nil, status.Error(codes.InvalidArgument, "provider and code are required")
+	if req.GetProvider() == "" || req.GetCode() == "" || req.GetState() == "" {
+		return nil, status.Error(codes.InvalidArgument, "provider, code, and state are required")
 	}
 
-	tokens, err := h.svc.CompleteOAuth(ctx, req.GetProvider(), req.GetCode(), req.GetRedirectUri())
+	tokens, err := h.svc.CompleteOAuth(ctx, req.GetProvider(), req.GetCode(), req.GetState(), req.GetRedirectUri())
 	if err != nil {
 		return nil, errors.ToGRPCError(err)
 	}

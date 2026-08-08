@@ -29,6 +29,7 @@ const (
 // (login/register/refresh, reflection, health). A method absent from this map is
 // authenticated; forgetting to add a genuinely public RPC causes 401s.
 var publicMethods = map[string]bool{
+	"/concord.auth.v1.AuthService/ListAuthMethods":              true,
 	"/concord.auth.v1.AuthService/LoginPassword":                true,
 	"/concord.auth.v1.AuthService/LoginOAuth":                   true,
 	"/concord.auth.v1.AuthService/OAuthBegin":                   true,

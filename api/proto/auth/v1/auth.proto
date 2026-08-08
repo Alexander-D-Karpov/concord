@@ -15,6 +15,10 @@ message LoginOAuthRequest {
   string provider = 1;
   string code = 2;
   string redirect_uri = 3;
+  // state is the opaque value returned by OAuthBegin. The server uses it to
+  // recover the per-request PKCE verifier and to bind the exchange to the
+  // provider/redirect_uri chosen at begin time. It is single-use.
+  string state = 4;
 }
 
 message Token {
@@ -50,7 +54,29 @@ message RegisterRequest {
 
 message EmptyResponse {}
 
+// AuthMethod describes one login option the server currently offers. type is
+// "password" or "oauth". For oauth methods, icon is a client-side icon hint and
+// begin_path is the relative path to call to start the flow (OAuthBegin).
+message AuthMethod {
+  string id = 1;
+  string type = 2;
+  string display_name = 3;
+  string icon = 4;
+  string begin_path = 5;
+}
+
+message ListAuthMethodsRequest {}
+
+message ListAuthMethodsResponse {
+  repeated AuthMethod methods = 1;
+}
+
 service AuthService {
+  rpc ListAuthMethods(ListAuthMethodsRequest) returns (ListAuthMethodsResponse) {
+    option (google.api.http) = {
+      get: "/v1/auth/methods"
+    };
+  }
   rpc Register(RegisterRequest) returns (Token) {
     option (google.api.http) = {
       post: "/v1/auth/register"

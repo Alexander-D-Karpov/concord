@@ -341,7 +341,14 @@ func run() error {
 
 	var oauthManager *oauth.Manager
 	if len(cfg.Auth.OAuth) > 0 {
-		oauthManager = oauth.NewManager(cfg.Auth)
+		oauthManager = oauth.NewManager(cfg.Auth.OAuth, nil, logger)
+		// Validate provider availability once synchronously so the first
+		// ListAuthMethods response is accurate, then keep it fresh in the
+		// background so a provider that was briefly unreachable at boot recovers.
+		vctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		oauthManager.RefreshAvailability(vctx)
+		cancel()
+		go oauthManager.StartValidation(ctx, 5*time.Minute)
 		logger.Info("OAuth providers configured", zap.Int("count", len(cfg.Auth.OAuth)))
 	}
 
@@ -353,6 +360,8 @@ func run() error {
 		cacheClient,
 		cfg.Auth,
 	)
+	// Ingest OAuth profile pictures into local avatar storage on first login.
+	authService.SetAvatarIngestion(cfg.Storage.Path, cfg.Storage.URL)
 	authHandler := authsvc.NewHandler(authService)
 
 	registryService := registry.NewService(database.Pool, logger)
