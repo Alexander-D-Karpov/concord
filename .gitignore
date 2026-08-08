@@ -8,6 +8,19 @@ uploads
 *.dylib
 /cmd/concord-api/concord-api
 /cmd/concord-voice/concord-voice
+# Accidental root-level build outputs
+/concord-api
+/concord-voice
+/tools/voicetest/voicetest
+
+# Cloned proto include deps (fetched by `make proto`, not source)
+/api/proto-deps/
+
+# Agent / workflow scratch and generated design docs — keep local, out of git
+/.claude/
+/.superpowers/
+/docs/superpowers/
+/CLAUDE.md
 
 # Test binary
 *.test

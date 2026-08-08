@@ -17,12 +17,25 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// VoiceSnapshotSender pushes the current voice state to a user when their event
+// stream connects. It is an interface, and injected post-construction via
+// SetVoiceSnapshotSender, to avoid an import cycle with the voice package.
+type VoiceSnapshotSender interface {
+	SendSnapshot(ctx context.Context, userID string)
+}
+
+// Handler implements the StreamService gRPC server, bridging a client's event
+// stream to the events.Hub and updating presence for the connected user.
 type Handler struct {
 	streamv1.UnimplementedStreamServiceServer
 	hub      *events.Hub
 	presence *users.PresenceManager
+	voice    VoiceSnapshotSender
 }
 
+// NewHandler creates a stream Handler wired to the event hub and presence
+// manager. The voice snapshot sender is left nil and must be supplied later via
+// SetVoiceSnapshotSender if voice snapshots are wanted.
 func NewHandler(hub *events.Hub, presence *users.PresenceManager) *Handler {
 	return &Handler{
 		hub:      hub,
@@ -30,6 +43,19 @@ func NewHandler(hub *events.Hub, presence *users.PresenceManager) *Handler {
 	}
 }
 
+// SetVoiceSnapshotSender injects the voice snapshot sender after construction,
+// the seam used to break the import cycle between this package and voice.
+func (h *Handler) SetVoiceSnapshotSender(sender VoiceSnapshotSender) {
+	h.voice = sender
+}
+
+// EventStream handles the bidirectional event stream for an authenticated user:
+// it marks the user online, registers the client with the hub, optionally sends
+// a voice snapshot, then reads client events (treating Ack as a presence
+// heartbeat) until the client closes, an error occurs, or the context is
+// cancelled. On return it removes the client and marks the user offline. It
+// returns an error if the user is unauthenticated, has an invalid ID, or the
+// hub rejects the client (e.g. during shutdown).
 func (h *Handler) EventStream(stream streamv1.StreamService_EventStreamServer) error {
 	ctx := stream.Context()
 	logger := logging.FromContext(ctx)
@@ -60,13 +86,17 @@ func (h *Handler) EventStream(stream streamv1.StreamService_EventStreamServer) e
 
 		dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := h.presence.SetOffline(dbCtx, userUUID); err != nil {
+		if err := h.presence.MarkDisconnected(dbCtx, userUUID); err != nil {
 			logger.Warn("failed to set user offline",
 				zap.String("user_id", userID),
 				zap.Error(err),
 			)
 		}
 	}()
+
+	if h.voice != nil {
+		go h.voice.SendSnapshot(ctx, userID)
+	}
 
 	logger.Info("stream connection established", zap.String("user_id", userID))
 
@@ -118,6 +148,8 @@ func (h *Handler) EventStream(stream streamv1.StreamService_EventStreamServer) e
 	}
 }
 
+// handleClientEvent dispatches a single inbound client event. Currently only
+// Ack events are handled (logged at debug); other payload types are ignored.
 func (h *Handler) handleClientEvent(userID string, event *streamv1.ClientEvent, logger *zap.Logger) {
 	switch payload := event.Payload.(type) {
 	case *streamv1.ClientEvent_Ack:

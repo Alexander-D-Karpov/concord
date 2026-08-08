@@ -9,14 +9,19 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Repository is the read-tracking data-access layer over pool for both room and
+// DM read status and unread counts.
 type Repository struct {
 	pool *pgxpool.Pool
 }
 
+// NewRepository returns a Repository backed by pool.
 func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
+// RoomReadStatus is a user's last-read position in one room. LastReadMessageID is
+// a Snowflake ID (0 when the user has never read the room).
 type RoomReadStatus struct {
 	UserID            uuid.UUID
 	RoomID            uuid.UUID
@@ -24,6 +29,7 @@ type RoomReadStatus struct {
 	UpdatedAt         time.Time
 }
 
+// DMReadStatus is the DM-channel counterpart of RoomReadStatus.
 type DMReadStatus struct {
 	UserID            uuid.UUID
 	ChannelID         uuid.UUID
@@ -31,6 +37,8 @@ type DMReadStatus struct {
 	UpdatedAt         time.Time
 }
 
+// RoomUnreadInfo summarizes one room's unread state for a user: how many unread
+// messages, the last-read position, and the latest message's ID/time.
 type RoomUnreadInfo struct {
 	RoomID            uuid.UUID
 	UnreadCount       int32
@@ -39,6 +47,7 @@ type RoomUnreadInfo struct {
 	LatestMessageAt   time.Time
 }
 
+// DMUnreadInfo is the DM-channel counterpart of RoomUnreadInfo.
 type DMUnreadInfo struct {
 	ChannelID         uuid.UUID
 	UnreadCount       int32
@@ -47,6 +56,9 @@ type DMUnreadInfo struct {
 	LatestMessageAt   time.Time
 }
 
+// GetRoomReadStatus returns the user's read status for a room. When no row exists
+// it returns a zero-value status (LastReadMessageID 0) rather than an error, so
+// callers can treat "never read" uniformly.
 func (r *Repository) GetRoomReadStatus(ctx context.Context, userID, roomID uuid.UUID) (*RoomReadStatus, error) {
 	query := `
 		SELECT user_id, room_id, last_read_message_id, updated_at
@@ -73,6 +85,9 @@ func (r *Repository) GetRoomReadStatus(ctx context.Context, userID, roomID uuid.
 	return status, err
 }
 
+// MarkRoomAsRead upserts the user's last-read position for a room. It only ever
+// advances the position (GREATEST of stored and new), so an out-of-order or
+// older messageID cannot move it backward.
 func (r *Repository) MarkRoomAsRead(ctx context.Context, userID, roomID uuid.UUID, messageID int64) error {
 	query := `
 		INSERT INTO room_read_status (user_id, room_id, last_read_message_id, updated_at)
@@ -85,6 +100,9 @@ func (r *Repository) MarkRoomAsRead(ctx context.Context, userID, roomID uuid.UUI
 	return err
 }
 
+// GetRoomUnreadCount counts non-deleted messages in a room with an ID greater
+// than the user's last-read position (0 if never read), relying on Snowflake IDs
+// being time-ordered.
 func (r *Repository) GetRoomUnreadCount(ctx context.Context, userID, roomID uuid.UUID) (int32, error) {
 	query := `
 		SELECT COUNT(*)::int
@@ -102,6 +120,9 @@ func (r *Repository) GetRoomUnreadCount(ctx context.Context, userID, roomID uuid
 	return count, err
 }
 
+// GetAllRoomUnreadCounts returns unread info for every room the user is a member
+// of that has unread messages (rooms fully read are omitted), ordered by latest
+// message time descending.
 func (r *Repository) GetAllRoomUnreadCounts(ctx context.Context, userID uuid.UUID) ([]RoomUnreadInfo, error) {
 	query := `
 		WITH user_rooms AS (
@@ -158,6 +179,8 @@ func (r *Repository) GetAllRoomUnreadCounts(ctx context.Context, userID uuid.UUI
 	return results, rows.Err()
 }
 
+// GetDMReadStatus is the DM counterpart of GetRoomReadStatus, returning a
+// zero-value status when the user has never read the channel.
 func (r *Repository) GetDMReadStatus(ctx context.Context, userID, channelID uuid.UUID) (*DMReadStatus, error) {
 	query := `
 		SELECT user_id, channel_id, last_read_message_id, updated_at
@@ -184,6 +207,8 @@ func (r *Repository) GetDMReadStatus(ctx context.Context, userID, channelID uuid
 	return status, err
 }
 
+// MarkDMAsRead is the DM counterpart of MarkRoomAsRead; it likewise only advances
+// the last-read position via GREATEST.
 func (r *Repository) MarkDMAsRead(ctx context.Context, userID, channelID uuid.UUID, messageID int64) error {
 	query := `
 		INSERT INTO dm_read_status (user_id, channel_id, last_read_message_id, updated_at)
@@ -196,6 +221,7 @@ func (r *Repository) MarkDMAsRead(ctx context.Context, userID, channelID uuid.UU
 	return err
 }
 
+// GetDMUnreadCount is the DM counterpart of GetRoomUnreadCount.
 func (r *Repository) GetDMUnreadCount(ctx context.Context, userID, channelID uuid.UUID) (int32, error) {
 	query := `
 		SELECT COUNT(*)::int
@@ -213,6 +239,9 @@ func (r *Repository) GetDMUnreadCount(ctx context.Context, userID, channelID uui
 	return count, err
 }
 
+// GetAllDMUnreadCounts is the DM counterpart of GetAllRoomUnreadCounts, covering
+// the user's DM channels and omitting fully-read ones, ordered by latest message
+// time descending.
 func (r *Repository) GetAllDMUnreadCounts(ctx context.Context, userID uuid.UUID) ([]DMUnreadInfo, error) {
 	query := `
 		WITH user_channels AS (
@@ -275,6 +304,8 @@ func (r *Repository) GetAllDMUnreadCounts(ctx context.Context, userID uuid.UUID)
 	return results, rows.Err()
 }
 
+// GetDMChannelParticipants returns the user IDs in a DM channel, used to fan out
+// read receipts to the other participants.
 func (r *Repository) GetDMChannelParticipants(ctx context.Context, channelID uuid.UUID) ([]uuid.UUID, error) {
 	query := `SELECT user_id FROM dm_participants WHERE channel_id = $1`
 

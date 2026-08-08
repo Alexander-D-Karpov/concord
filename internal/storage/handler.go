@@ -8,11 +8,13 @@ import (
 	"go.uber.org/zap"
 )
 
+// Handler is an HTTP handler that serves stored blobs from the local filesystem.
 type Handler struct {
 	service *Storage
 	logger  *zap.Logger
 }
 
+// NewHandler returns a Handler that serves files from the given Storage.
 func NewHandler(service *Storage, logger *zap.Logger) *Handler {
 	return &Handler{
 		service: service,
@@ -20,6 +22,9 @@ func NewHandler(service *Storage, logger *zap.Logger) *Handler {
 	}
 }
 
+// ServeHTTP serves a GET request for a stored file under the "/files/" prefix. It
+// rejects non-GET methods, empty paths, and any path containing ".." after
+// cleaning to prevent directory traversal outside the storage base path.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

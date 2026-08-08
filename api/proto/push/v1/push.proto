@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package concord.push.v1;
+
+option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/push/v1;pushv1";
+
+import "google/api/annotations.proto";
+import "google/protobuf/empty.proto";
+
+enum DevicePlatform {
+  DEVICE_PLATFORM_UNSPECIFIED = 0;
+  DEVICE_PLATFORM_ANDROID = 1;
+}
+
+message RegisterDeviceRequest {
+  string device_id = 1;   // client-generated stable UUID, survives token rotation
+  DevicePlatform platform = 2;
+  string fcm_token = 3;
+  string app_version = 4;
+  string locale = 5;
+}
+message RegisterDeviceResponse { string device_id = 1; }
+message UnregisterDeviceRequest { string device_id = 1; }
+
+service PushService {
+  rpc RegisterDevice(RegisterDeviceRequest) returns (RegisterDeviceResponse) {
+    option (google.api.http) = { post: "/v1/push/devices" body: "*" };
+  }
+  rpc UnregisterDevice(UnregisterDeviceRequest) returns (google.protobuf.Empty) {
+    option (google.api.http) = { delete: "/v1/push/devices/{device_id}" };
+  }
+}

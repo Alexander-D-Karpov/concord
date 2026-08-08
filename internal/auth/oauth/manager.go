@@ -14,14 +14,20 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// Manager holds the configured OAuth2 providers keyed by name (e.g. "google",
+// "github") and drives the authorization-code flow for each.
 type Manager struct {
 	providers map[string]*Provider
 }
 
+// Provider wraps a single provider's oauth2.Config (client credentials, endpoints,
+// and scopes).
 type Provider struct {
 	config *oauth2.Config
 }
 
+// UserInfo is the provider-agnostic profile extracted from a provider's user-info
+// endpoint. ID is the provider's stable subject identifier.
 type UserInfo struct {
 	ID      string
 	Email   string
@@ -29,6 +35,8 @@ type UserInfo struct {
 	Picture string
 }
 
+// NewManager builds a Manager from the OAuth entries in cfg, constructing one
+// oauth2.Config per provider with scopes chosen by getScopes for the provider name.
 func NewManager(cfg config.AuthConfig) *Manager {
 	m := &Manager{
 		providers: make(map[string]*Provider),
@@ -52,6 +60,9 @@ func NewManager(cfg config.AuthConfig) *Manager {
 	return m
 }
 
+// GetAuthURL returns the provider's authorization URL and a freshly generated CSRF
+// state to embed in it. A non-empty redirectURI overrides the configured redirect
+// for this request only. Errors if the provider is not configured.
 func (m *Manager) GetAuthURL(provider, redirectURI string) (string, string, error) {
 	p, exists := m.providers[provider]
 	if !exists {
@@ -69,6 +80,9 @@ func (m *Manager) GetAuthURL(provider, redirectURI string) (string, string, erro
 	return p.config.AuthCodeURL(state), state, nil
 }
 
+// ExchangeCode swaps an authorization code for an access token and then fetches the
+// user's profile. A non-empty redirectURI must match the one used in GetAuthURL and
+// overrides the configured redirect. Errors if the provider is unknown or exchange fails.
 func (m *Manager) ExchangeCode(ctx context.Context, provider, code, redirectURI string) (*UserInfo, error) {
 	p, exists := m.providers[provider]
 	if !exists {
@@ -94,6 +108,8 @@ func (m *Manager) ExchangeCode(ctx context.Context, provider, code, redirectURI 
 	return m.fetchUserInfo(ctx, provider, token.AccessToken)
 }
 
+// fetchUserInfo calls the provider's user-info endpoint with the bearer accessToken
+// and parses the response. It errors on an unknown provider or a non-200 response.
 func (m *Manager) fetchUserInfo(ctx context.Context, provider, accessToken string) (*UserInfo, error) {
 	var userInfoURL string
 	switch provider {
@@ -134,6 +150,9 @@ func (m *Manager) fetchUserInfo(ctx context.Context, provider, accessToken strin
 	return parseUserInfo(provider, body)
 }
 
+// parseUserInfo maps a provider's raw user-info JSON into a UserInfo, handling the
+// differing field names of each provider (e.g. GitHub's numeric id and login
+// fallback). If no email is present it synthesizes a placeholder "<provider>_<id>@oauth".
 func parseUserInfo(provider string, data []byte) (*UserInfo, error) {
 	var raw map[string]interface{}
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -165,6 +184,7 @@ func parseUserInfo(provider string, data []byte) (*UserInfo, error) {
 	return info, nil
 }
 
+// getString returns m[key] as a string, or "" if absent or not a string.
 func getString(m map[string]interface{}, key string) string {
 	if val, ok := m[key].(string); ok {
 		return val
@@ -172,6 +192,8 @@ func getString(m map[string]interface{}, key string) string {
 	return ""
 }
 
+// getScopes returns the OAuth scopes requested for the given provider (email and
+// profile access), or an empty slice for an unrecognized provider.
 func getScopes(provider string) []string {
 	switch provider {
 	case "google":
@@ -186,6 +208,8 @@ func getScopes(provider string) []string {
 	}
 }
 
+// generateState returns a URL-safe, base64-encoded 32-byte random CSRF state. It
+// returns "" if the system RNG fails; callers should treat "" as an error condition.
 func generateState() string {
 	b := make([]byte, 32)
 	_, err := rand.Read(b)
@@ -195,10 +219,14 @@ func generateState() string {
 	return base64.URLEncoding.EncodeToString(b)
 }
 
+// ValidateState reports whether the callback state matches the expected value,
+// treating an empty state as invalid to defend against CSRF.
 func ValidateState(state, expected string) bool {
 	return state != "" && state == expected
 }
 
+// BuildCallbackURL returns baseURL with its path set to /auth/<provider>/callback.
+// A malformed baseURL yields a best-effort result rather than an error.
 func BuildCallbackURL(baseURL, provider string) string {
 	u, _ := url.Parse(baseURL)
 	u.Path = fmt.Sprintf("/auth/%s/callback", provider)

@@ -12,6 +12,10 @@ import (
 	"google.golang.org/grpc"
 )
 
+// Server is the voice node's gRPC control-plane endpoint. It implements the
+// RegistryService server interface but currently only answers Heartbeat probes
+// (the voice node is a registry client, not a registry); the embedded
+// Unimplemented base stubs the rest and keeps forward compatibility.
 type Server struct {
 	registryv1.UnimplementedRegistryServiceServer
 	sessionManager *session.Manager
@@ -22,6 +26,8 @@ type Server struct {
 	capacity       int32
 }
 
+// NewServer builds the control server. name is suffixed with the voice build
+// version (as "name/vX") so peers can see which binary is running.
 func NewServer(
 	sessionManager *session.Manager,
 	logger *zap.Logger,
@@ -38,6 +44,9 @@ func NewServer(
 	}
 }
 
+// Start listens on the given TCP port and serves gRPC until ctx is cancelled
+// (then it GracefulStops and returns nil) or Serve fails. Blocks for the
+// server's lifetime; returns the listen/serve error otherwise.
 func (s *Server) Start(ctx context.Context, port int) error {
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -65,11 +74,14 @@ func (s *Server) Start(ctx context.Context, port int) error {
 	}
 }
 
+// Heartbeat acknowledges a probe by logging it and returning an empty response;
+// it performs no liveness bookkeeping and always succeeds.
 func (s *Server) Heartbeat(ctx context.Context, req *registryv1.HeartbeatRequest) (*registryv1.EmptyResponse, error) {
 	s.logger.Debug("received heartbeat", zap.String("server_id", req.ServerId))
 	return &registryv1.EmptyResponse{}, nil
 }
 
+// Stats reports this node's live session count against its configured capacity.
 type Stats struct {
 	ActiveSessions int32
 	Capacity       int32

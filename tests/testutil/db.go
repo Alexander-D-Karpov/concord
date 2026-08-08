@@ -17,6 +17,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Package-level state backs the single per-process test database: once guards its
+// one-time creation and migration, shared holds the connected pool, dbName is the
+// randomly named database currently in use, and teardownMu/tornDown make Teardown
+// safe to call more than once.
 var (
 	once       sync.Once
 	shared     *db.DB
@@ -25,6 +29,7 @@ var (
 	tornDown   bool
 )
 
+// envOr returns the value of environment variable key, or def when it is unset or empty.
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -32,12 +37,17 @@ func envOr(key, def string) string {
 	return def
 }
 
+// randomSuffix returns a 6-character hex string used to give each test run a unique
+// database name, so parallel or repeated runs never collide on the same database.
 func randomSuffix() string {
 	var b [3]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
 }
 
+// baseConfig builds the DatabaseConfig shared by the admin and application
+// connections from the DB_HOST/DB_USER/DB_PASSWORD env vars (defaulting to a local
+// postgres). The Database field is intentionally left empty for the caller to set.
 func baseConfig() config.DatabaseConfig {
 	return config.DatabaseConfig{
 		Host:            envOr("DB_HOST", "localhost"),
@@ -85,12 +95,20 @@ func GetDB(t *testing.T) *db.DB {
 	return shared
 }
 
+// CurrentDBName returns the randomly generated name of the active test database, or
+// an empty string before GetDB has created one.
 func CurrentDBName() string { return dbName }
 
+// Pool returns the pgx connection pool of the shared test database, creating and
+// migrating it on first use via GetDB.
 func Pool(t *testing.T) *pgxpool.Pool {
 	return GetDB(t).Pool
 }
 
+// Teardown closes the shared pool and drops the randomly named test database. It is
+// idempotent (guarded so a repeated call is a no-op) and typically runs once from a
+// TestMain after all tests finish. It uses DROP DATABASE ... WITH (FORCE) to evict any
+// lingering connections, and does nothing if no database was ever created.
 func Teardown() {
 	teardownMu.Lock()
 	defer teardownMu.Unlock()

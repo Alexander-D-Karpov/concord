@@ -8,15 +8,20 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// Handler is the gRPC FriendsService server; it validates requests and delegates
+// to Service, mapping domain errors to gRPC status errors.
 type Handler struct {
 	friendsv1.UnimplementedFriendsServiceServer
 	service *Service
 }
 
+// NewHandler returns a Handler backed by the given Service.
 func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
 }
 
+// SendFriendRequest creates a pending friend request to req.UserId and returns it
+// enriched with both users' profile fields; errors if user_id is empty.
 func (h *Handler) SendFriendRequest(ctx context.Context, req *friendsv1.SendFriendRequestRequest) (*friendsv1.SendFriendRequestResponse, error) {
 	if req.UserId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("user_id is required"))
@@ -45,6 +50,8 @@ func (h *Handler) SendFriendRequest(ctx context.Context, req *friendsv1.SendFrie
 	}, nil
 }
 
+// AcceptFriendRequest accepts the pending request identified by req.RequestId,
+// creating the friendship; errors if request_id is empty.
 func (h *Handler) AcceptFriendRequest(ctx context.Context, req *friendsv1.AcceptFriendRequestRequest) (*friendsv1.EmptyResponse, error) {
 	if req.RequestId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("request_id is required"))
@@ -57,6 +64,8 @@ func (h *Handler) AcceptFriendRequest(ctx context.Context, req *friendsv1.Accept
 	return &friendsv1.EmptyResponse{}, nil
 }
 
+// RejectFriendRequest rejects the pending request identified by req.RequestId
+// (recipient side); errors if request_id is empty.
 func (h *Handler) RejectFriendRequest(ctx context.Context, req *friendsv1.RejectFriendRequestRequest) (*friendsv1.EmptyResponse, error) {
 	if req.RequestId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("request_id is required"))
@@ -69,6 +78,8 @@ func (h *Handler) RejectFriendRequest(ctx context.Context, req *friendsv1.Reject
 	return &friendsv1.EmptyResponse{}, nil
 }
 
+// CancelFriendRequest cancels the pending request identified by req.RequestId
+// (sender side); errors if request_id is empty.
 func (h *Handler) CancelFriendRequest(ctx context.Context, req *friendsv1.CancelFriendRequestRequest) (*friendsv1.EmptyResponse, error) {
 	if req.RequestId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("request_id is required"))
@@ -81,6 +92,7 @@ func (h *Handler) CancelFriendRequest(ctx context.Context, req *friendsv1.Cancel
 	return &friendsv1.EmptyResponse{}, nil
 }
 
+// RemoveFriend deletes the friendship with req.UserId; errors if user_id is empty.
 func (h *Handler) RemoveFriend(ctx context.Context, req *friendsv1.RemoveFriendRequest) (*friendsv1.EmptyResponse, error) {
 	if req.UserId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("user_id is required"))
@@ -93,6 +105,7 @@ func (h *Handler) RemoveFriend(ctx context.Context, req *friendsv1.RemoveFriendR
 	return &friendsv1.EmptyResponse{}, nil
 }
 
+// ListFriends returns the caller's friends with their live effective status.
 func (h *Handler) ListFriends(ctx context.Context, req *friendsv1.ListFriendsRequest) (*friendsv1.ListFriendsResponse, error) {
 	friends, err := h.service.ListFriends(ctx)
 	if err != nil {
@@ -116,6 +129,8 @@ func (h *Handler) ListFriends(ctx context.Context, req *friendsv1.ListFriendsReq
 	}, nil
 }
 
+// ListPendingRequests returns the caller's incoming and outgoing pending friend
+// requests, each enriched with the other user's profile fields.
 func (h *Handler) ListPendingRequests(ctx context.Context, req *friendsv1.ListPendingRequestsRequest) (*friendsv1.ListPendingRequestsResponse, error) {
 	incoming, outgoing, err := h.service.ListPendingRequests(ctx)
 	if err != nil {
@@ -138,6 +153,8 @@ func (h *Handler) ListPendingRequests(ctx context.Context, req *friendsv1.ListPe
 	}, nil
 }
 
+// toProtoFriendRequestWithUser maps an enriched friend request to its protobuf
+// form, translating the string status into the corresponding enum (defaulting to pending).
 func toProtoFriendRequestWithUser(req *FriendRequestWithUser) *friendsv1.FriendRequest {
 	status := friendsv1.FriendRequestStatus_FRIEND_REQUEST_STATUS_PENDING
 	switch req.Status {
@@ -163,6 +180,8 @@ func toProtoFriendRequestWithUser(req *FriendRequestWithUser) *friendsv1.FriendR
 	}
 }
 
+// BlockUser blocks req.UserId (also removing any existing friendship); errors if
+// user_id is empty.
 func (h *Handler) BlockUser(ctx context.Context, req *friendsv1.BlockUserRequest) (*friendsv1.EmptyResponse, error) {
 	if req.UserId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("user_id is required"))
@@ -175,6 +194,7 @@ func (h *Handler) BlockUser(ctx context.Context, req *friendsv1.BlockUserRequest
 	return &friendsv1.EmptyResponse{}, nil
 }
 
+// UnblockUser removes a block on req.UserId; errors if user_id is empty.
 func (h *Handler) UnblockUser(ctx context.Context, req *friendsv1.UnblockUserRequest) (*friendsv1.EmptyResponse, error) {
 	if req.UserId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("user_id is required"))
@@ -187,6 +207,7 @@ func (h *Handler) UnblockUser(ctx context.Context, req *friendsv1.UnblockUserReq
 	return &friendsv1.EmptyResponse{}, nil
 }
 
+// ListBlockedUsers returns the IDs of users the caller has blocked.
 func (h *Handler) ListBlockedUsers(ctx context.Context, req *friendsv1.ListBlockedUsersRequest) (*friendsv1.ListBlockedUsersResponse, error) {
 	userIDs, err := h.service.ListBlockedUsers(ctx)
 	if err != nil {

@@ -6,6 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"image"
+	_ "image/gif"  // register GIF decoder for image.DecodeConfig
+	_ "image/jpeg" // register JPEG decoder for image.DecodeConfig
+	_ "image/png"  // register PNG decoder for image.DecodeConfig
 	"io"
 	"mime"
 	"os"
@@ -15,14 +19,20 @@ import (
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	_ "golang.org/x/image/webp" // register WebP decoder for image.DecodeConfig
 )
 
+// Storage writes uploaded blobs under basePath on the local filesystem and builds
+// their public URLs from baseURL.
 type Storage struct {
 	basePath string
 	baseURL  string
 	logger   *zap.Logger
 }
 
+// FileInfo describes a stored file: its identifiers, content type, size, storage
+// path relative to the base, public URL, SHA-256 hash, and (for images) pixel
+// dimensions.
 type FileInfo struct {
 	ID          string
 	Filename    string
@@ -36,10 +46,14 @@ type FileInfo struct {
 }
 
 const (
-	MaxFileSize  = 50 * 1024 * 1024
+	// MaxFileSize is the maximum accepted size for non-image uploads.
+	MaxFileSize = 50 * 1024 * 1024
+	// MaxImageSize is the maximum accepted size for image uploads.
 	MaxImageSize = 10 * 1024 * 1024
 )
 
+// allowedTypes is the set of MIME types accepted by StoreFromReader; anything else
+// is rejected.
 var allowedTypes = map[string]bool{
 	"image/jpeg":      true,
 	"image/png":       true,
@@ -51,6 +65,8 @@ var allowedTypes = map[string]bool{
 	"text/plain":      true,
 }
 
+// New returns a Storage rooted at basePath, creating the directory if needed, and
+// serving URLs under baseURL.
 func New(basePath, baseURL string, logger *zap.Logger) (*Storage, error) {
 	if err := os.MkdirAll(basePath, 0755); err != nil {
 		return nil, fmt.Errorf("create storage directory: %w", err)
@@ -63,11 +79,18 @@ func New(basePath, baseURL string, logger *zap.Logger) (*Storage, error) {
 	}, nil
 }
 
+// Store writes data as a new file and returns its FileInfo; it is a convenience
+// wrapper around StoreFromReader.
 func (s *Storage) Store(ctx context.Context, data []byte, filename, contentType string) (*FileInfo, error) {
 	reader := bytes.NewReader(data)
 	return s.StoreFromReader(ctx, reader, filename, contentType)
 }
 
+// StoreFromReader reads, validates, and writes an uploaded file. It infers the
+// content type from the filename when empty, rejects disallowed types, and enforces
+// MaxImageSize for images or MaxFileSize otherwise. Files are stored under a
+// date-partitioned directory with a random UUID name; the returned FileInfo
+// includes the SHA-256 hash and, for images, dimensions.
 func (s *Storage) StoreFromReader(ctx context.Context, reader io.Reader, filename, contentType string) (*FileInfo, error) {
 	if contentType == "" {
 		contentType = mime.TypeByExtension(filepath.Ext(filename))
@@ -139,6 +162,9 @@ func (s *Storage) StoreFromReader(ctx context.Context, reader io.Reader, filenam
 	return info, nil
 }
 
+// Get opens the file at path (relative to the base) and returns its reader and
+// inferred content type; the caller must close the reader. It errors if the path is
+// missing or is a directory.
 func (s *Storage) Get(ctx context.Context, path string) (io.ReadCloser, string, error) {
 	fullPath := filepath.Join(s.basePath, path)
 
@@ -164,6 +190,7 @@ func (s *Storage) Get(ctx context.Context, path string) (io.ReadCloser, string, 
 	return file, contentType, nil
 }
 
+// Delete removes the file at path (relative to the base); a missing file is not an error.
 func (s *Storage) Delete(ctx context.Context, path string) error {
 	fullPath := filepath.Join(s.basePath, path)
 	if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
@@ -172,6 +199,15 @@ func (s *Storage) Delete(ctx context.Context, path string) error {
 	return nil
 }
 
+// getImageDimensions returns the image's pixel width and height, decoded from the
+// image header only (via image.DecodeConfig, so the full image is not decoded). It
+// returns 0, 0 for non-image or undecodable data; the registered decoders cover
+// PNG, JPEG, GIF, and WebP. contentType is advisory only — the bytes are trusted
+// over it.
 func (s *Storage) getImageDimensions(data []byte, contentType string) (int, int) {
-	return 0, 0
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return 0, 0
+	}
+	return cfg.Width, cfg.Height
 }

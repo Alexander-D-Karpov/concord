@@ -13,16 +13,93 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// migrations embeds every .sql file in this directory at build time so the
+// binary carries its schema migrations with no external files.
+//
 //go:embed *.sql
 var migrations embed.FS
 
+// MigrationStatus reports whether a single embedded migration has been applied.
+type MigrationStatus struct {
+	Version int
+	Name    string
+	Applied bool
+}
+
+// Status returns every embedded migration with whether it has been applied, in
+// ascending version order. It ensures the tracking table exists but does not apply
+// any migrations. Intended for `concord-cli migrate status`.
+func Status(ctx context.Context, pool *pgxpool.Pool) ([]MigrationStatus, error) {
+	if err := createMigrationsTable(ctx, pool); err != nil {
+		return nil, err
+	}
+	applied, err := getAppliedVersions(ctx, pool)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := migrations.ReadDir(".")
+	if err != nil {
+		return nil, err
+	}
+	var out []MigrationStatus
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		parts := strings.SplitN(e.Name(), "_", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		v, err := strconv.Atoi(parts[0])
+		if err != nil {
+			continue
+		}
+		out = append(out, MigrationStatus{
+			Version: v,
+			Name:    strings.TrimSuffix(parts[1], ".sql"),
+			Applied: applied[v],
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
+	return out, nil
+}
+
+// Migration is one parsed SQL migration file. Version comes from the numeric
+// filename prefix (NNN_name.sql) and orders application.
 type Migration struct {
 	Version int
 	Name    string
 	SQL     string
 }
 
+// migrationLockKey is the fixed Postgres advisory-lock key that serializes Run
+// across processes. Its arbitrary value just needs to be stable and app-unique.
+const migrationLockKey int64 = 0x636F6E636F7264 // "concord"
+
+// Run applies all pending migrations in ascending version order. It ensures the
+// schema_migrations bookkeeping table exists, skips versions already recorded
+// there, and applies each remaining migration in its own transaction. It is
+// idempotent: a fully migrated database is a no-op. Progress is logged via the
+// standard log package.
+//
+// Run holds a session-level Postgres advisory lock for its duration, so concurrent
+// callers (multiple API replicas starting together, or parallel test binaries
+// sharing a database) serialize rather than racing on DDL and bookkeeping rows.
 func Run(ctx context.Context, pool *pgxpool.Pool) error {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration lock conn: %w", err)
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationLockKey); err != nil {
+		return fmt.Errorf("acquire migration advisory lock: %w", err)
+	}
+	defer func() {
+		// Best-effort release; the lock is also freed when the session ends.
+		_, _ = conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", migrationLockKey)
+	}()
+
 	if err := createMigrationsTable(ctx, pool); err != nil {
 		return fmt.Errorf("create migrations table: %w", err)
 	}
@@ -55,6 +132,8 @@ func Run(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+// createMigrationsTable creates the schema_migrations tracking table if it does
+// not already exist.
 func createMigrationsTable(ctx context.Context, pool *pgxpool.Pool) error {
 	_, err := pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -66,6 +145,8 @@ func createMigrationsTable(ctx context.Context, pool *pgxpool.Pool) error {
 	return err
 }
 
+// getAppliedVersions returns the set of migration versions already recorded in
+// schema_migrations, keyed by version for O(1) lookup.
 func getAppliedVersions(ctx context.Context, pool *pgxpool.Pool) (map[int]bool, error) {
 	rows, err := pool.Query(ctx, "SELECT version FROM schema_migrations")
 	if err != nil {
@@ -85,6 +166,10 @@ func getAppliedVersions(ctx context.Context, pool *pgxpool.Pool) (map[int]bool, 
 	return versions, rows.Err()
 }
 
+// getMigrationsToApply reads the embedded .sql files, parses each NNN_name.sql
+// name into a Migration, drops any whose version is in appliedVersions, and
+// returns the rest sorted ascending by version. Files with an unparseable name
+// or version are logged and skipped, not treated as errors.
 func getMigrationsToApply(appliedVersions map[int]bool) ([]Migration, error) {
 	entries, err := migrations.ReadDir(".")
 	if err != nil {
@@ -141,6 +226,9 @@ func getMigrationsToApply(appliedVersions map[int]bool) ([]Migration, error) {
 	return toApply, nil
 }
 
+// applyMigration runs one migration's SQL and records it in schema_migrations
+// within a single transaction, so a failure rolls back both the schema change
+// and its bookkeeping row (all-or-nothing).
 func applyMigration(ctx context.Context, pool *pgxpool.Pool, migration Migration) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {

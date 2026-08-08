@@ -8,10 +8,15 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Validator is implemented by request messages that can self-validate. The
+// ValidationInterceptor calls Validate on any request that satisfies it.
 type Validator interface {
 	Validate() error
 }
 
+// ValidationInterceptor returns a unary interceptor that runs Validate on any
+// request implementing Validator, rejecting it with codes.InvalidArgument if
+// validation fails. Requests that do not implement Validator pass through.
 func ValidationInterceptor() grpc.UnaryServerInterceptor {
 	return func(
 		ctx context.Context,

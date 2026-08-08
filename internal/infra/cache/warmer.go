@@ -7,11 +7,14 @@ import (
 	"go.uber.org/zap"
 )
 
+// Warmer pre-populates the cache with data (e.g. user profiles) so the first
+// real request hits a warm cache instead of the origin store.
 type Warmer struct {
 	cache  *Cache
 	logger *zap.Logger
 }
 
+// NewWarmer returns a Warmer that writes into cache and logs failures to logger.
 func NewWarmer(cache *Cache, logger *zap.Logger) *Warmer {
 	return &Warmer{
 		cache:  cache,
@@ -19,6 +22,9 @@ func NewWarmer(cache *Cache, logger *zap.Logger) *Warmer {
 	}
 }
 
+// WarmUserProfiles loads each user via loader and caches it under "user:<id>"
+// with a 5-minute TTL. Per-user load or cache errors are logged and skipped
+// rather than aborting the batch, so it always returns nil.
 func (w *Warmer) WarmUserProfiles(ctx context.Context, userIDs []string, loader func(string) (interface{}, error)) error {
 	for _, userID := range userIDs {
 		data, err := loader(userID)

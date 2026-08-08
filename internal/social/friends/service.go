@@ -14,13 +14,29 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-type Service struct {
-	repo      *Repository
-	hub       *events.Hub
-	usersRepo *users.Repository
-	presence  *users.PresenceManager
+// SharedRoomKeyRotator rotates voice keys in rooms shared by two users, so a
+// blocked user loses access to the blocker's future media. *voiceassign.Service
+// satisfies it.
+type SharedRoomKeyRotator interface {
+	RotateSharedRooms(ctx context.Context, userA, userB string) error
 }
 
+// Service holds friend and block business logic. It resolves user profiles via
+// usersRepo, decorates friends with live presence, broadcasts social events over
+// hub, and (if set) rotates shared-room voice keys through keyRotator on block.
+type Service struct {
+	repo       *Repository
+	hub        *events.Hub
+	usersRepo  *users.Repository
+	presence   *users.PresenceManager
+	keyRotator SharedRoomKeyRotator
+}
+
+// SetKeyRotator installs the key rotator used to revoke a blocked user's voice
+// access; it is optional and wired after construction to avoid an import cycle.
+func (s *Service) SetKeyRotator(kr SharedRoomKeyRotator) { s.keyRotator = kr }
+
+// NewService constructs a Service; the key rotator is nil until SetKeyRotator is called.
 func NewService(repo *Repository, hub *events.Hub, usersRepo *users.Repository, presence *users.PresenceManager) *Service {
 	return &Service{
 		repo:      repo,
@@ -30,6 +46,11 @@ func NewService(repo *Repository, hub *events.Hub, usersRepo *users.Repository, 
 	}
 }
 
+// SendFriendRequest creates a pending request from the caller to toUserID after
+// validating that they differ, are not already friends, have no existing pending
+// request, and that the caller is not blocked by the target. On success it
+// broadcasts FriendRequestCreated to both users and returns the request plus both
+// user records.
 func (s *Service) SendFriendRequest(ctx context.Context, toUserID string) (*FriendRequest, *users.User, *users.User, error) {
 	fromUserID := interceptor.GetUserID(ctx)
 	if fromUserID == "" {
@@ -135,6 +156,9 @@ func (s *Service) SendFriendRequest(ctx context.Context, toUserID string) (*Frie
 	return request, fromUser, toUser, nil
 }
 
+// AcceptFriendRequest creates the friendship and marks the request accepted, after
+// verifying the caller is the recipient (Forbidden otherwise) and the request is
+// still pending (Conflict otherwise). It broadcasts FriendRequestUpdated to both users.
 func (s *Service) AcceptFriendRequest(ctx context.Context, requestID string) error {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -206,6 +230,9 @@ func (s *Service) AcceptFriendRequest(ctx context.Context, requestID string) err
 	return nil
 }
 
+// RejectFriendRequest marks a pending request rejected after verifying the caller
+// is the recipient (Forbidden otherwise) and it is still pending (Conflict
+// otherwise). It broadcasts FriendRequestUpdated to both users.
 func (s *Service) RejectFriendRequest(ctx context.Context, requestID string) error {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -273,6 +300,9 @@ func (s *Service) RejectFriendRequest(ctx context.Context, requestID string) err
 	return nil
 }
 
+// CancelFriendRequest lets the sender withdraw a pending request (stored as
+// "rejected") after verifying the caller is the sender (Forbidden otherwise) and it
+// is still pending (Conflict otherwise). It broadcasts FriendRequestUpdated to both users.
 func (s *Service) CancelFriendRequest(ctx context.Context, requestID string) error {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -341,6 +371,8 @@ func (s *Service) CancelFriendRequest(ctx context.Context, requestID string) err
 	return nil
 }
 
+// RemoveFriend deletes the friendship between the caller and friendUserID and
+// broadcasts a FriendRemoved event to each side so both clients drop the other.
 func (s *Service) RemoveFriend(ctx context.Context, friendUserID string) error {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -390,6 +422,8 @@ func (s *Service) RemoveFriend(ctx context.Context, friendUserID string) error {
 	return nil
 }
 
+// ListFriends returns the caller's friends, overwriting each friend's Status with
+// their effective status computed from their stored preference and live presence.
 func (s *Service) ListFriends(ctx context.Context) ([]*Friend, error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -421,6 +455,8 @@ func (s *Service) ListFriends(ctx context.Context) ([]*Friend, error) {
 	return friends, nil
 }
 
+// ListPendingRequests returns the caller's incoming and outgoing pending friend
+// requests, each enriched with the counterpart user's profile fields.
 func (s *Service) ListPendingRequests(ctx context.Context) (incoming, outgoing []*FriendRequestWithUser, err error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -445,6 +481,10 @@ func (s *Service) ListPendingRequests(ctx context.Context) (incoming, outgoing [
 	return incoming, outgoing, nil
 }
 
+// BlockUser blocks blockedUserID for the caller, first removing any existing
+// friendship. If they were friends it triggers the key rotator to revoke the
+// blocked user's access in shared voice rooms and broadcasts FriendRemoved to both
+// sides; it always broadcasts UserBlocked to the blocked user. Cannot block yourself.
 func (s *Service) BlockUser(ctx context.Context, blockedUserID string) error {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -474,6 +514,11 @@ func (s *Service) BlockUser(ctx context.Context, blockedUserID string) error {
 
 	if err := s.repo.BlockUser(ctx, userUUID, blockedUUID); err != nil {
 		return err
+	}
+
+	// Rotate voice keys in any shared active call so the blocked user loses access.
+	if s.keyRotator != nil {
+		_ = s.keyRotator.RotateSharedRooms(ctx, userID, blockedUserID)
 	}
 
 	if s.hub != nil {
@@ -517,6 +562,8 @@ func (s *Service) BlockUser(ctx context.Context, blockedUserID string) error {
 	return nil
 }
 
+// UnblockUser removes the caller's block on blockedUserID and broadcasts a
+// UserUnblocked event to that user.
 func (s *Service) UnblockUser(ctx context.Context, blockedUserID string) error {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -552,6 +599,7 @@ func (s *Service) UnblockUser(ctx context.Context, blockedUserID string) error {
 	return nil
 }
 
+// ListBlockedUsers returns the IDs (as strings) of users the caller has blocked.
 func (s *Service) ListBlockedUsers(ctx context.Context) ([]string, error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {

@@ -8,10 +8,16 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.uber.org/zap"
 )
 
+// Metrics is the voice server's counter set, exported over HTTP as Prometheus
+// text and JSON. All counters are lock-free atomics updated on hot paths; the
+// exported fields may be read directly. roomStats, rttHist, and the snap* fields
+// carry their own synchronization. A zero Metrics is not usable — construct with
+// NewMetrics so the RTT histogram is allocated.
 type Metrics struct {
 	logger *zap.Logger
 
@@ -41,15 +47,33 @@ type Metrics struct {
 	QualityReportsRx  atomic.Uint64
 	ReceiverReportsRx atomic.Uint64
 
+	Migrations        atomic.Uint64
+	Rebinds           atomic.Uint64
+	PlisThrottled     atomic.Uint64
+	HellosThrottled   atomic.Uint64
+	AudioDropped      atomic.Uint64
+	VideoDropped      atomic.Uint64
+	VideoNoSubscriber atomic.Uint64
+
 	roomStats sync.Map
 	rttHist   *histogram
+
+	snapMu       sync.Mutex
+	prevSnap     rawCounters
+	prevSnapTime time.Time
+	snapInited   bool
 }
 
+// roomMetrics accumulates per-room routed volume; stored by value's pointer in
+// Metrics.roomStats and updated atomically without holding the map lock.
 type roomMetrics struct {
 	PacketsRouted atomic.Uint64
 	BytesRouted   atomic.Uint64
 }
 
+// histogram is a fixed-bucket cumulative latency histogram guarded by its own
+// mutex. bounds are the inclusive upper edges (ms); buckets has one extra slot
+// for the +Inf overflow. count and sum feed Prometheus _count/_sum.
 type histogram struct {
 	mu      sync.Mutex
 	buckets []int64
@@ -58,6 +82,9 @@ type histogram struct {
 	sum     float64
 }
 
+// Stats is a plain-value snapshot of the core counters for the JSON endpoint
+// and the status API. It is a subset of Metrics (the video/throttle/migration
+// counters are Prometheus-only) taken via GetStats.
 type Stats struct {
 	PacketsReceived   uint64 `json:"packets_received"`
 	PacketsSent       uint64 `json:"packets_sent"`
@@ -85,6 +112,8 @@ type Stats struct {
 	ReceiverReportsRx uint64 `json:"receiver_reports_received"`
 }
 
+// NewMetrics returns a Metrics with the RTT histogram bucketed at
+// 1..1000 ms. All counters start at zero.
 func NewMetrics(logger *zap.Logger) *Metrics {
 	return &Metrics{
 		logger: logger,
@@ -95,6 +124,10 @@ func NewMetrics(logger *zap.Logger) *Metrics {
 	}
 }
 
+// Start serves Prometheus text at path and JSON at /metrics/json on the given
+// port, blocking until ctx is cancelled (then it drains via Shutdown) or
+// ListenAndServe fails. Returns the listen/serve error, or nil on clean
+// context-cancelled shutdown.
 func (m *Metrics) Start(ctx context.Context, port int, path string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(path, m.handleProm)
@@ -117,6 +150,10 @@ func (m *Metrics) Start(ctx context.Context, port int, path string) error {
 	}
 }
 
+// handleProm writes the full counter set in Prometheus text exposition format,
+// including the derived voice_media_drop_ratio gauge, the RTT histogram, and the
+// top-20 per-room gauges. Counter snapshots are read independently, so the
+// output is not a single consistent instant.
 func (m *Metrics) handleProm(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	p := func(name, help, typ string, val uint64) {
@@ -149,6 +186,21 @@ func (m *Metrics) handleProm(w http.ResponseWriter, r *http.Request) {
 	p("voice_subscriptions_total", "Subscriptions received", "counter", m.SubscriptionsRx.Load())
 	p("voice_quality_reports_total", "Quality reports received", "counter", m.QualityReportsRx.Load())
 	p("voice_receiver_reports_total", "Receiver reports received", "counter", m.ReceiverReportsRx.Load())
+	p("voice_migrations_total", "Session address migrations", "counter", m.Migrations.Load())
+	p("voice_rebinds_total", "Session rebinds via hello", "counter", m.Rebinds.Load())
+	p("voice_plis_throttled_total", "PLIs suppressed by throttle", "counter", m.PlisThrottled.Load())
+	p("voice_hellos_throttled_total", "Hellos shed by flood protection", "counter", m.HellosThrottled.Load())
+	p("voice_audio_dropped_total", "Audio packets dropped (audio queue full)", "counter", m.AudioDropped.Load())
+	p("voice_video_dropped_total", "Video packets dropped (video queue full)", "counter", m.VideoDropped.Load())
+	p("voice_video_no_subscriber_total", "Video packets received that reached no receiver", "counter", m.VideoNoSubscriber.Load())
+
+	recv := m.PacketsReceived.Load()
+	drop := m.PacketsDropped.Load() + m.AudioDropped.Load() + m.VideoDropped.Load()
+	ratio := 0.0
+	if recv > 0 {
+		ratio = float64(drop) / float64(recv)
+	}
+	_, _ = fmt.Fprintf(w, "# HELP voice_media_drop_ratio Fraction of media packets dropped\n# TYPE voice_media_drop_ratio gauge\nvoice_media_drop_ratio %f\n", ratio)
 
 	m.rttHist.mu.Lock()
 	cum := int64(0)
@@ -162,42 +214,140 @@ func (m *Metrics) handleProm(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = fmt.Fprintf(w, "voice_rtt_ms_sum %f\nvoice_rtt_ms_count %d\n", m.rttHist.sum, m.rttHist.count)
 	m.rttHist.mu.Unlock()
+
+	m.writeTopRooms(w, 20)
 }
 
+// writeTopRooms exports the top-N rooms by routed bytes (bounded label
+// cardinality) — surfacing the previously-collected-but-unexported roomStats.
+func (m *Metrics) writeTopRooms(w http.ResponseWriter, n int) {
+	rooms := m.topRooms(n)
+	if len(rooms) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "# HELP voice_room_routed_bytes Bytes routed per room (top %d)\n# TYPE voice_room_routed_bytes gauge\n", n)
+	for _, r := range rooms {
+		_, _ = fmt.Fprintf(w, "voice_room_routed_bytes{room=%q} %d\n", r.Room, r.Bytes)
+	}
+	_, _ = fmt.Fprintf(w, "# HELP voice_room_routed_packets Packets routed per room (top %d)\n# TYPE voice_room_routed_packets gauge\n", n)
+	for _, r := range rooms {
+		_, _ = fmt.Fprintf(w, "voice_room_routed_packets{room=%q} %d\n", r.Room, r.Pkts)
+	}
+}
+
+// handleJSON writes GetStats as JSON — the human/dashboard-friendly subset of
+// the Prometheus output.
 func (m *Metrics) handleJSON(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(m.GetStats())
 }
 
+// RecordPacketReceived counts one inbound packet and adds its wire size (bytes)
+// to BytesReceived. Concurrency-safe; called on every UDP read.
 func (m *Metrics) RecordPacketReceived(bytes uint64) {
 	m.PacketsReceived.Add(1)
 	m.BytesReceived.Add(bytes)
 }
-func (m *Metrics) RecordPacketSent(bytes uint64) { m.PacketsSent.Add(1); m.BytesSent.Add(bytes) }
-func (m *Metrics) RecordPacketDropped()          { m.PacketsDropped.Add(1) }
-func (m *Metrics) RecordControlDropped()         { m.ControlDropped.Add(1) }
-func (m *Metrics) RecordControlSent()            { m.ControlSent.Add(1) }
-func (m *Metrics) RecordAudioIn()                { m.AudioPacketsIn.Add(1) }
-func (m *Metrics) RecordVideoIn()                { m.VideoPacketsIn.Add(1) }
-func (m *Metrics) RecordAudioOut()               { m.AudioPacketsOut.Add(1) }
-func (m *Metrics) RecordVideoOut()               { m.VideoPacketsOut.Add(1) }
-func (m *Metrics) RecordAudioOutN(n uint64)      { m.AudioPacketsOut.Add(n) }
-func (m *Metrics) RecordVideoOutN(n uint64)      { m.VideoPacketsOut.Add(n) }
-func (m *Metrics) RecordNack()                   { m.NacksReceived.Add(1) }
-func (m *Metrics) RecordPli()                    { m.PlisReceived.Add(1) }
-func (m *Metrics) RecordRetransmit()             { m.RetransmitsSent.Add(1) }
-func (m *Metrics) RecordHello()                  { m.HellosReceived.Add(1) }
-func (m *Metrics) RecordWelcome()                { m.WelcomesSent.Add(1) }
-func (m *Metrics) RecordBye()                    { m.ByesReceived.Add(1) }
-func (m *Metrics) RecordPing()                   { m.PingsReceived.Add(1) }
-func (m *Metrics) RecordPong()                   { m.PongsSent.Add(1) }
-func (m *Metrics) RecordSubscribe()              { m.SubscriptionsRx.Add(1) }
-func (m *Metrics) RecordQualityReport()          { m.QualityReportsRx.Add(1) }
-func (m *Metrics) RecordReceiverReport()         { m.ReceiverReportsRx.Add(1) }
-func (m *Metrics) RecordRTT(ms float64)          { m.rttHist.observe(ms) }
-func (m *Metrics) SetActiveSessions(c int32)     { m.ActiveSessions.Store(c) }
-func (m *Metrics) SetActiveRooms(c int32)        { m.ActiveRooms.Store(c) }
 
+// RecordPacketSent counts one outbound packet and adds bytes to BytesSent.
+func (m *Metrics) RecordPacketSent(bytes uint64) { m.PacketsSent.Add(1); m.BytesSent.Add(bytes) }
+
+// RecordPacketDropped counts a media packet dropped for reasons other than a
+// full audio/video queue (those use RecordAudioDropped/RecordVideoDropped).
+func (m *Metrics) RecordPacketDropped() { m.PacketsDropped.Add(1) }
+
+// RecordControlDropped counts a control-plane packet that could not be sent
+// (e.g. control send queue full).
+func (m *Metrics) RecordControlDropped() { m.ControlDropped.Add(1) }
+
+// RecordControlSent counts one successfully emitted control-plane packet.
+func (m *Metrics) RecordControlSent() { m.ControlSent.Add(1) }
+
+// RecordAudioIn counts one received audio media packet.
+func (m *Metrics) RecordAudioIn() { m.AudioPacketsIn.Add(1) }
+
+// RecordVideoIn counts one received video media packet.
+func (m *Metrics) RecordVideoIn() { m.VideoPacketsIn.Add(1) }
+
+// RecordAudioOut counts one forwarded audio packet (one destination).
+func (m *Metrics) RecordAudioOut() { m.AudioPacketsOut.Add(1) }
+
+// RecordVideoOut counts one forwarded video packet (one destination).
+func (m *Metrics) RecordVideoOut() { m.VideoPacketsOut.Add(1) }
+
+// RecordAudioOutN adds n forwarded audio packets at once — one fan-out to n
+// subscribers counted in a single atomic add.
+func (m *Metrics) RecordAudioOutN(n uint64) { m.AudioPacketsOut.Add(n) }
+
+// RecordVideoOutN adds n forwarded video packets at once (fan-out to n subscribers).
+func (m *Metrics) RecordVideoOutN(n uint64) { m.VideoPacketsOut.Add(n) }
+
+// RecordNack counts one received NACK (RTCP retransmission request).
+func (m *Metrics) RecordNack() { m.NacksReceived.Add(1) }
+
+// RecordPli counts one received PLI (picture-loss indication / keyframe request).
+func (m *Metrics) RecordPli() { m.PlisReceived.Add(1) }
+
+// RecordRetransmit counts one packet resent in response to a NACK.
+func (m *Metrics) RecordRetransmit() { m.RetransmitsSent.Add(1) }
+
+// RecordHello counts one received HELLO (session handshake/bind).
+func (m *Metrics) RecordHello() { m.HellosReceived.Add(1) }
+
+// RecordWelcome counts one WELCOME sent in reply to a HELLO.
+func (m *Metrics) RecordWelcome() { m.WelcomesSent.Add(1) }
+
+// RecordBye counts one received BYE (client-signalled disconnect).
+func (m *Metrics) RecordBye() { m.ByesReceived.Add(1) }
+
+// RecordPing counts one received keepalive PING.
+func (m *Metrics) RecordPing() { m.PingsReceived.Add(1) }
+
+// RecordPong counts one PONG sent in reply to a PING.
+func (m *Metrics) RecordPong() { m.PongsSent.Add(1) }
+
+// RecordSubscribe counts one received subscription request.
+func (m *Metrics) RecordSubscribe() { m.SubscriptionsRx.Add(1) }
+
+// RecordQualityReport counts one received client quality report.
+func (m *Metrics) RecordQualityReport() { m.QualityReportsRx.Add(1) }
+
+// RecordReceiverReport counts one received RTCP receiver report.
+func (m *Metrics) RecordReceiverReport() { m.ReceiverReportsRx.Add(1) }
+
+// RecordMigration counts one session whose peer address changed (e.g. NAT rebind).
+func (m *Metrics) RecordMigration() { m.Migrations.Add(1) }
+
+// RecordRebind counts one session re-established via a fresh HELLO on an existing SSRC.
+func (m *Metrics) RecordRebind() { m.Rebinds.Add(1) }
+
+// RecordPliThrottled counts one PLI suppressed by the rate limiter rather than forwarded.
+func (m *Metrics) RecordPliThrottled() { m.PlisThrottled.Add(1) }
+
+// RecordHelloThrottled counts one HELLO shed by flood protection.
+func (m *Metrics) RecordHelloThrottled() { m.HellosThrottled.Add(1) }
+
+// RecordAudioDropped counts one audio packet dropped because the audio send queue was full.
+func (m *Metrics) RecordAudioDropped() { m.AudioDropped.Add(1) }
+
+// RecordVideoDropped counts one video packet dropped because the video send queue was full.
+func (m *Metrics) RecordVideoDropped() { m.VideoDropped.Add(1) }
+
+// RecordVideoNoSubscriber counts one received video packet that reached no
+// receiver (no subscribers), useful for spotting wasted uplink.
+func (m *Metrics) RecordVideoNoSubscriber() { m.VideoNoSubscriber.Add(1) }
+
+// RecordRTT feeds one round-trip sample (milliseconds) into the RTT histogram.
+func (m *Metrics) RecordRTT(ms float64) { m.rttHist.observe(ms) }
+
+// SetActiveSessions stores the current live session gauge (absolute value, not a delta).
+func (m *Metrics) SetActiveSessions(c int32) { m.ActiveSessions.Store(c) }
+
+// SetActiveRooms stores the current live room gauge (absolute value, not a delta).
+func (m *Metrics) SetActiveRooms(c int32) { m.ActiveRooms.Store(c) }
+
+// RecordRoomRouted attributes one routed packet and its bytes to roomID,
+// lazily creating the room's counter. Feeds the top-rooms view; concurrency-safe.
 func (m *Metrics) RecordRoomRouted(roomID string, bytes uint64) {
 	v, _ := m.roomStats.LoadOrStore(roomID, &roomMetrics{})
 	rm := v.(*roomMetrics)
@@ -205,6 +355,8 @@ func (m *Metrics) RecordRoomRouted(roomID string, bytes uint64) {
 	rm.BytesRouted.Add(bytes)
 }
 
+// GetStats reads the core counters into a Stats value. Each field is loaded
+// independently, so the result is a near-instant, not a locked-consistent, view.
 func (m *Metrics) GetStats() Stats {
 	return Stats{
 		PacketsReceived:   m.PacketsReceived.Load(),
@@ -234,6 +386,8 @@ func (m *Metrics) GetStats() Stats {
 	}
 }
 
+// observe records one value into its bucket (values above the top bound land in
+// the +Inf overflow slot) and updates count and sum. Holds the histogram lock.
 func (h *histogram) observe(val float64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

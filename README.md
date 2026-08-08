@@ -49,17 +49,25 @@ A high-performance voice and chat platform built with Go, featuring real-time me
 - Efficient read tracking using last-read positions
 
 #### Voice Server (concord-voice)
-- UDP-based media relay
-- ChaCha20-Poly1305 encryption
-- SFU (Selective Forwarding Unit) architecture
-- Audio-first QoS
-- Session management
+- UDP-based media relay (SFU — Selective Forwarding Unit)
+- AES-256-GCM encryption with per-SSRC HKDF-derived nonces and replay protection
+- Congestion control with audio-first prioritization (control > audio > video)
+- Optional TCP/TLS fallback for clients with blocked UDP
+- Single-port (SO_REUSEPORT) or port-range UDP modes
+- Stateless: registers with the API and heartbeats; holds no database
+
+#### CLI (concord-cli)
+- Small operational tool (e.g. clearing rate-limit keys)
+
+> For a full package-by-package map, data flows, and gotchas, see
+> [`docs/architecture.md`](docs/architecture.md). Contributor conventions and build/test commands
+> live in [`CLAUDE.md`](CLAUDE.md).
 
 ## Quick Start
 
 ### Prerequisites
 
-- Go 1.22+
+- Go 1.25+
 - PostgreSQL 14+
 - Redis 7+
 - Protocol Buffers compiler
@@ -123,14 +131,14 @@ make test-integration # Run integration tests
 make lint          # Run linter
 make build         # Build binaries
 make proto         # Generate protobuf
-make docker-build  # Build Docker images
+make images        # Build Docker images
 ```
 
 ## Deployment
 
 ### Docker
 ```bash
-make docker-build
+make images
 docker-compose -f deploy/docker-compose.yml up -d
 ```
 

@@ -7,6 +7,7 @@ option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/dm/v1;dmv1
 import "google/api/annotations.proto";
 import "google/protobuf/timestamp.proto";
 import "call/v1/call.proto";
+import "common/v1/types.proto";
 
 message DMChannel {
   string id = 1;
@@ -36,6 +37,15 @@ message DMMessage {
   string reply_to_id = 8;
   repeated DMAttachment attachments = 9;
   repeated ReadReceipt read_by = 10;
+  int32 reply_count = 11;
+  bool pinned = 12;
+  repeated concord.common.v1.MessageReaction reactions = 13;
+  repeated string mentions = 14;
+  concord.common.v1.ForwardInfo forward_info = 15;
+  string media_group_id = 16;
+  string reply_quoted_content = 17;
+  optional bool reply_mention_author = 18;
+  int32 edit_count = 19;
 }
 
 message DMAttachment {
@@ -157,10 +167,94 @@ message JoinDMCallResponse {
   concord.call.v1.CodecHint codec = 4;
   concord.call.v1.CryptoSuite crypto = 5;
   repeated concord.call.v1.Participant participants = 6;
+  uint32 expires_in = 7;
+  concord.call.v1.UdpEndpoint tcp_endpoint = 8;
 }
 
 message LeaveDMCallRequest {
   string channel_id = 1;
+}
+
+message AddDMReactionRequest {
+  string channel_id = 1;
+  string message_id = 2;
+  string emoji = 3;
+}
+message AddDMReactionResponse {
+  concord.common.v1.MessageReaction reaction = 1;
+}
+message RemoveDMReactionRequest {
+  string channel_id = 1;
+  string message_id = 2;
+  string emoji = 3;
+}
+
+message PinDMMessageRequest {
+  string channel_id = 1;
+  string message_id = 2;
+}
+message UnpinDMMessageRequest {
+  string channel_id = 1;
+  string message_id = 2;
+}
+message ListDMPinnedRequest {
+  string channel_id = 1;
+}
+message ListDMPinnedResponse {
+  repeated DMMessage messages = 1;
+}
+
+message GetDMThreadRequest {
+  string channel_id = 1;
+  string message_id = 2;
+  string cursor = 3;
+  int32 limit = 4;
+}
+message GetDMThreadResponse {
+  DMMessage parent = 1;
+  repeated DMMessage replies = 2;
+  string next_cursor = 3;
+}
+
+message SearchDMMessagesRequest {
+  string channel_id = 1;
+  string query = 2;
+  int32 limit = 3;
+}
+message SearchDMMessagesResponse {
+  repeated DMMessage messages = 1;
+  bool has_more = 2;
+}
+
+message GetDMUnreadCountsRequest {}
+message DMUnreadInfo {
+  string channel_id = 1;
+  int32 unread_count = 2;
+  string last_read_message_id = 3;
+  string latest_message_id = 4;
+  google.protobuf.Timestamp latest_message_at = 5;
+}
+message GetDMUnreadCountsResponse {
+  repeated DMUnreadInfo channels = 1;
+  int32 total_unread = 2;
+}
+
+message ListDMMessagesSinceRequest {
+  string channel_id = 1;
+  string after_message_id = 2;
+  int32 limit = 3;
+}
+message ListDMMessagesSinceResponse {
+  repeated DMMessage messages = 1;
+  bool has_more = 2;
+}
+
+message GetDMEditHistoryRequest {
+  string channel_id = 1;
+  string message_id = 2;
+}
+message GetDMEditHistoryResponse {
+  repeated concord.common.v1.EditHistoryEntry entries = 1;
 }
 
 message EmptyResponse {}
@@ -240,6 +334,57 @@ service DMService {
   rpc LeaveDMCall(LeaveDMCallRequest) returns (EmptyResponse) {
     option (google.api.http) = {
       post: "/v1/dm/{channel_id}/call/leave"
+    };
+  }
+  rpc AddDMReaction(AddDMReactionRequest) returns (AddDMReactionResponse) {
+    option (google.api.http) = {
+      post: "/v1/dm/{channel_id}/messages/{message_id}/reactions"
+      body: "*"
+    };
+  }
+  rpc RemoveDMReaction(RemoveDMReactionRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      delete: "/v1/dm/{channel_id}/messages/{message_id}/reactions/{emoji}"
+    };
+  }
+  rpc PinDMMessage(PinDMMessageRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/dm/{channel_id}/messages/{message_id}/pin"
+    };
+  }
+  rpc UnpinDMMessage(UnpinDMMessageRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      delete: "/v1/dm/{channel_id}/messages/{message_id}/pin"
+    };
+  }
+  rpc ListDMPinned(ListDMPinnedRequest) returns (ListDMPinnedResponse) {
+    option (google.api.http) = {
+      get: "/v1/dm/{channel_id}/pinned"
+    };
+  }
+  rpc GetDMThread(GetDMThreadRequest) returns (GetDMThreadResponse) {
+    option (google.api.http) = {
+      get: "/v1/dm/{channel_id}/messages/{message_id}/thread"
+    };
+  }
+  rpc SearchDMMessages(SearchDMMessagesRequest) returns (SearchDMMessagesResponse) {
+    option (google.api.http) = {
+      get: "/v1/dm/{channel_id}/messages/search"
+    };
+  }
+  rpc GetDMUnreadCounts(GetDMUnreadCountsRequest) returns (GetDMUnreadCountsResponse) {
+    option (google.api.http) = {
+      get: "/v1/dm/unread"
+    };
+  }
+  rpc ListDMMessagesSince(ListDMMessagesSinceRequest) returns (ListDMMessagesSinceResponse) {
+    option (google.api.http) = {
+      get: "/v1/dm/{channel_id}/messages/since/{after_message_id}"
+    };
+  }
+  rpc GetDMEditHistory(GetDMEditHistoryRequest) returns (GetDMEditHistoryResponse) {
+    option (google.api.http) = {
+      get: "/v1/dm/{channel_id}/messages/{message_id}/history"
     };
   }
 }

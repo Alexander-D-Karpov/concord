@@ -13,6 +13,9 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Metrics holds the Prometheus collectors for the API (request counts and
+// durations, active connections, DB query timings, cache hit ratios, errors)
+// and the HTTP server that exposes them on /metrics.
 type Metrics struct {
 	requestsTotal     *prometheus.CounterVec
 	requestDuration   *prometheus.HistogramVec
@@ -24,6 +27,9 @@ type Metrics struct {
 	server            *http.Server
 }
 
+// NewMetrics creates the collectors and registers them with the default
+// Prometheus registry. It panics (via MustRegister) if any collector is already
+// registered, so it must be called at most once per process.
 func NewMetrics(logger *zap.Logger) *Metrics {
 	m := &Metrics{
 		requestsTotal: prometheus.NewCounterVec(
@@ -84,6 +90,9 @@ func NewMetrics(logger *zap.Logger) *Metrics {
 	return m
 }
 
+// UnaryServerInterceptor returns a unary interceptor that records request count,
+// duration, active-connection gauge, and (on failure) the error counter labeled
+// by gRPC status code. It always passes the handler's response and error through.
 func (m *Metrics) UnaryServerInterceptor() grpc.UnaryServerInterceptor {
 	return func(
 		ctx context.Context,
@@ -112,6 +121,8 @@ func (m *Metrics) UnaryServerInterceptor() grpc.UnaryServerInterceptor {
 	}
 }
 
+// StreamServerInterceptor is the streaming counterpart of
+// UnaryServerInterceptor, recording the same metrics over the stream's lifetime.
 func (m *Metrics) StreamServerInterceptor() grpc.StreamServerInterceptor {
 	return func(
 		srv interface{},
@@ -140,10 +151,14 @@ func (m *Metrics) StreamServerInterceptor() grpc.StreamServerInterceptor {
 	}
 }
 
+// RecordDBQuery observes the duration of a database query, bucketed by
+// queryType, into the db_query_duration histogram.
 func (m *Metrics) RecordDBQuery(queryType string, duration time.Duration) {
 	m.dbQueryDuration.WithLabelValues(queryType).Observe(duration.Seconds())
 }
 
+// RecordCacheHit increments the cache counter for cacheType, tagging the sample
+// "hit" or "miss" according to hit.
 func (m *Metrics) RecordCacheHit(cacheType string, hit bool) {
 	status := "hit"
 	if !hit {
@@ -152,6 +167,9 @@ func (m *Metrics) RecordCacheHit(cacheType string, hit bool) {
 	m.cacheHits.WithLabelValues(cacheType, status).Inc()
 }
 
+// Start serves the /metrics endpoint on port and blocks until the server fails
+// or ctx is cancelled, in which case it gracefully shuts the server down. A
+// clean ErrServerClosed is not reported as an error.
 func (m *Metrics) Start(ctx context.Context, port int) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
@@ -178,6 +196,8 @@ func (m *Metrics) Start(ctx context.Context, port int) error {
 	}
 }
 
+// Stop gracefully shuts down the metrics HTTP server, or returns nil if it was
+// never started.
 func (m *Metrics) Stop(ctx context.Context) error {
 	if m.server == nil {
 		return nil

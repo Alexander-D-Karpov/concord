@@ -14,12 +14,16 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// Service holds room CRUD business logic: it enforces admin-only mutations,
+// caches per-user room lists, and broadcasts room lifecycle events via the hub.
+// cache may be nil, disabling the user-rooms list cache.
 type Service struct {
 	repo  *Repository
 	hub   *events.Hub
 	cache *cache.AsidePattern
 }
 
+// NewService assembles the rooms Service; a nil aside disables list caching.
 func NewService(repo *Repository, hub *events.Hub, aside *cache.AsidePattern) *Service {
 	return &Service{
 		repo:  repo,
@@ -28,6 +32,10 @@ func NewService(repo *Repository, hub *events.Hub, aside *cache.AsidePattern) *S
 	}
 }
 
+// CreateRoom creates a room owned by the caller and adds the caller as its first
+// member with the "admin" role. An unparseable voiceServerID is ignored (left
+// unset) rather than rejected. On success it triggers the caller's room-join sync
+// and invalidates their cached room list.
 func (s *Service) CreateRoom(ctx context.Context, name string, voiceServerID *string, region *string, description string, isPrivate bool) (*Room, error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -77,6 +85,8 @@ func (s *Service) CreateRoom(ctx context.Context, name string, voiceServerID *st
 	return room, nil
 }
 
+// GetRoom returns a room by id string. It performs no membership check, so
+// callers needing access control must gate it separately.
 func (s *Service) GetRoom(ctx context.Context, id string) (*Room, error) {
 	roomID, err := uuid.Parse(id)
 	if err != nil {
@@ -86,6 +96,9 @@ func (s *Service) GetRoom(ctx context.Context, id string) (*Room, error) {
 	return s.repo.GetByID(ctx, roomID)
 }
 
+// UpdateRoom applies partial updates (nil pointers leave a field unchanged; an
+// empty name is ignored) to a room. Only an admin member may update it; on
+// success it broadcasts RoomUpdated to the room.
 func (s *Service) UpdateRoom(ctx context.Context, roomID string, name *string, description *string, isPrivate *bool) (*Room, error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -144,6 +157,9 @@ func (s *Service) UpdateRoom(ctx context.Context, roomID string, name *string, d
 	return room, nil
 }
 
+// DeleteRoom soft-deletes a room. Only an admin member may delete it; on success
+// it asynchronously broadcasts RoomDeleted (tagged with the deleting user) to the
+// room.
 func (s *Service) DeleteRoom(ctx context.Context, roomID string) error {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -187,6 +203,9 @@ func (s *Service) DeleteRoom(ctx context.Context, roomID string) error {
 	return nil
 }
 
+// ListRoomsForUser returns the caller's rooms, read-through cached under
+// "u:<user>:rooms" for 30s and falling back to a direct repo query on cache
+// miss or error.
 func (s *Service) ListRoomsForUser(ctx context.Context) ([]*Room, error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -215,6 +234,8 @@ func (s *Service) ListRoomsForUser(ctx context.Context) ([]*Room, error) {
 	return s.repo.ListByUser(ctx, userUUID)
 }
 
+// AttachVoiceServer assigns a voice server to a room and returns the refreshed
+// room. Only an admin member may do this.
 func (s *Service) AttachVoiceServer(ctx context.Context, roomID string, voiceServerID string) (*Room, error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {

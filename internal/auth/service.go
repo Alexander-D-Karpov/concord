@@ -15,22 +15,31 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// Service implements the authentication business logic: registration, password
+// and OAuth login, and token issue/refresh/revoke. It depends on the users
+// repository, a Postgres pool for refresh-token storage, the JWT and OAuth
+// managers, and an optional user cache.
 type Service struct {
 	usersRepo  *users.Repository
 	pool       *pgxpool.Pool
 	jwt        *jwt.Manager
 	oauth      *oauth.Manager
 	cache      *cache.Cache
+	lockout    *LockoutManager
 	accessTTL  time.Duration
 	refreshTTL time.Duration
 }
 
+// Tokens is the credential set returned to a client on successful auth. ExpiresIn
+// is the access-token lifetime in seconds; the refresh token lives longer.
 type Tokens struct {
 	AccessToken  string
 	RefreshToken string
 	ExpiresIn    int64
 }
 
+// NewService wires a Service from its dependencies, taking the access and refresh
+// token TTLs from cfg. cacheClient may be nil, in which case user caching is skipped.
 func NewService(
 	usersRepo *users.Repository,
 	pool *pgxpool.Pool,
@@ -39,7 +48,7 @@ func NewService(
 	cacheClient *cache.Cache,
 	cfg config.AuthConfig,
 ) *Service {
-	return &Service{
+	s := &Service{
 		usersRepo:  usersRepo,
 		pool:       pool,
 		jwt:        jwtMgr,
@@ -48,8 +57,17 @@ func NewService(
 		accessTTL:  cfg.JWTExpiration,
 		refreshTTL: cfg.RefreshExpiration,
 	}
+	// Brute-force lockout requires the cache to hold counters; it is enabled only
+	// when a cache is present and a positive attempt limit is configured.
+	if cacheClient != nil && cfg.LoginMaxAttempts > 0 {
+		s.lockout = NewLockoutManager(cacheClient, cfg.LoginMaxAttempts, cfg.LoginLockoutPeriod, cfg.LoginAttemptWindow)
+	}
+	return s
 }
 
+// Register validates the handle (3-32 chars) and password (min 6 chars), rejects
+// an already-taken handle with a Conflict, bcrypt-hashes the password, creates the
+// user, and returns a fresh token pair. The plaintext password is never stored.
 func (s *Service) Register(ctx context.Context, handle, password, displayName string) (*Tokens, error) {
 	if len(handle) < 3 || len(handle) > 32 {
 		return nil, apperr.BadRequest("handle must be 3-32 characters")
@@ -82,23 +100,56 @@ func (s *Service) Register(ctx context.Context, handle, password, displayName st
 	return s.issueTokens(ctx, user)
 }
 
+// LoginPassword authenticates by handle and password, returning a token pair on
+// success. It returns the same generic Unauthorized ("invalid credentials") for an
+// unknown handle, an OAuth-only account with no password, and a wrong password, so
+// callers cannot distinguish which check failed.
 func (s *Service) LoginPassword(ctx context.Context, handle, password string) (*Tokens, error) {
+	// Reject early when the identifier is locked out. The counter is keyed on the
+	// submitted handle regardless of whether the account exists, so brute-forcing a
+	// single handle is throttled without revealing whether it exists.
+	if s.lockout != nil {
+		if locked, err := s.lockout.IsLocked(ctx, handle); err == nil && locked {
+			return nil, apperr.TooManyRequests("too many failed login attempts, try again later")
+		}
+	}
+
 	user, err := s.usersRepo.GetByHandle(ctx, handle)
 	if err != nil {
+		s.recordLoginFailure(ctx, handle)
 		return nil, apperr.Unauthorized("invalid credentials")
 	}
 
 	if user.PasswordHash == nil || *user.PasswordHash == "" {
+		s.recordLoginFailure(ctx, handle)
 		return nil, apperr.Unauthorized("invalid credentials")
 	}
 
 	if bcrypt.CompareHashAndPassword([]byte(*user.PasswordHash), []byte(password)) != nil {
+		s.recordLoginFailure(ctx, handle)
 		return nil, apperr.Unauthorized("invalid credentials")
+	}
+
+	if s.lockout != nil {
+		_ = s.lockout.ClearAttempts(ctx, handle)
 	}
 
 	return s.issueTokens(ctx, user)
 }
 
+// recordLoginFailure counts a failed login attempt for handle when lockout is
+// enabled, tripping a lock once the configured threshold is reached. Cache errors
+// are ignored so a cache blip never blocks a legitimate login.
+func (s *Service) recordLoginFailure(ctx context.Context, handle string) {
+	if s.lockout != nil {
+		_ = s.lockout.RecordFailedAttempt(ctx, handle)
+	}
+}
+
+// RefreshToken exchanges a valid, unrevoked, unexpired refresh token for a new
+// token pair. It verifies the JWT, then checks the token's SHA-256 hash exists in
+// the database for that user, revokes the old token (rotation, single use), and
+// issues fresh tokens. Any failed check returns Unauthorized.
 func (s *Service) RefreshToken(ctx context.Context, refreshToken string) (*Tokens, error) {
 	claims, err := s.jwt.ValidateRefreshToken(refreshToken)
 	if err != nil {
@@ -139,6 +190,8 @@ func (s *Service) RefreshToken(ctx context.Context, refreshToken string) (*Token
 	return s.issueTokens(ctx, user)
 }
 
+// RevokeRefreshToken marks the token's stored hash as revoked (logout). It is
+// idempotent: revoking an unknown or already-revoked token is not an error.
 func (s *Service) RevokeRefreshToken(ctx context.Context, refreshToken string) error {
 	tokenHash := hashToken(refreshToken)
 	_, err := s.pool.Exec(ctx, `
@@ -147,6 +200,8 @@ func (s *Service) RevokeRefreshToken(ctx context.Context, refreshToken string) e
 	return err
 }
 
+// BeginOAuth returns the provider authorization URL and a CSRF state value the
+// client must echo back on callback. It returns BadRequest if OAuth is unconfigured.
 func (s *Service) BeginOAuth(ctx context.Context, provider, redirectURI string) (string, string, error) {
 	if s.oauth == nil {
 		return "", "", apperr.BadRequest("OAuth not configured")
@@ -154,6 +209,10 @@ func (s *Service) BeginOAuth(ctx context.Context, provider, redirectURI string) 
 	return s.oauth.GetAuthURL(provider, redirectURI)
 }
 
+// CompleteOAuth exchanges the authorization code for provider user info and returns
+// a token pair. If no local user is linked to that provider identity it lazily
+// creates one (using the provider email as handle). Returns BadRequest if OAuth is
+// unconfigured. The caller is responsible for having verified the CSRF state first.
 func (s *Service) CompleteOAuth(ctx context.Context, provider, code, redirectURI string) (*Tokens, error) {
 	if s.oauth == nil {
 		return nil, apperr.BadRequest("OAuth not configured")
@@ -182,6 +241,10 @@ func (s *Service) CompleteOAuth(ctx context.Context, provider, code, redirectURI
 	return s.issueTokens(ctx, user)
 }
 
+// issueTokens generates an access/refresh pair for the user, persists the refresh
+// token's SHA-256 hash (never the token itself) with its expiry, and best-effort
+// caches the user for 5 minutes. Storing only the hash means a database leak does
+// not expose usable refresh tokens.
 func (s *Service) issueTokens(ctx context.Context, user *users.User) (*Tokens, error) {
 	accessToken, err := s.jwt.GenerateAccessToken(user.ID.String(), user.Handle, s.accessTTL)
 	if err != nil {

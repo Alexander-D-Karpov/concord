@@ -9,15 +9,20 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Handler adapts the auth Service to the gRPC AuthService interface, translating
+// requests and mapping app errors to gRPC status codes via errors.ToGRPCError.
 type Handler struct {
 	authv1.UnimplementedAuthServiceServer
 	svc *Service
 }
 
+// NewHandler returns a Handler backed by the given Service.
 func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
+// Register handles the Register RPC: it requires handle and password, defaults the
+// display name to the handle when empty, and returns a Bearer token pair.
 func (h *Handler) Register(ctx context.Context, req *authv1.RegisterRequest) (*authv1.Token, error) {
 	if req.GetHandle() == "" || req.GetPassword() == "" {
 		return nil, status.Error(codes.InvalidArgument, "handle and password are required")
@@ -41,6 +46,8 @@ func (h *Handler) Register(ctx context.Context, req *authv1.RegisterRequest) (*a
 	}, nil
 }
 
+// LoginPassword handles the LoginPassword RPC, requiring handle and password and
+// returning a Bearer token pair on success.
 func (h *Handler) LoginPassword(ctx context.Context, req *authv1.LoginPasswordRequest) (*authv1.Token, error) {
 	if req.GetHandle() == "" || req.GetPassword() == "" {
 		return nil, status.Error(codes.InvalidArgument, "handle and password are required")
@@ -59,6 +66,8 @@ func (h *Handler) LoginPassword(ctx context.Context, req *authv1.LoginPasswordRe
 	}, nil
 }
 
+// Refresh handles the Refresh RPC, rotating the supplied refresh token for a new
+// Bearer token pair. Requires a non-empty refresh_token.
 func (h *Handler) Refresh(ctx context.Context, req *authv1.RefreshRequest) (*authv1.Token, error) {
 	if req.GetRefreshToken() == "" {
 		return nil, status.Error(codes.InvalidArgument, "refresh_token is required")
@@ -77,6 +86,8 @@ func (h *Handler) Refresh(ctx context.Context, req *authv1.RefreshRequest) (*aut
 	}, nil
 }
 
+// Logout handles the Logout RPC by revoking the given refresh token. An empty
+// refresh_token is treated as a successful no-op rather than an error.
 func (h *Handler) Logout(ctx context.Context, req *authv1.LogoutRequest) (*authv1.EmptyResponse, error) {
 	if req.GetRefreshToken() == "" {
 		return &authv1.EmptyResponse{}, nil
@@ -89,6 +100,8 @@ func (h *Handler) Logout(ctx context.Context, req *authv1.LogoutRequest) (*authv
 	return &authv1.EmptyResponse{}, nil
 }
 
+// OAuthBegin handles the OAuthBegin RPC, returning the provider authorization URL
+// and the CSRF state the client must present on callback. Requires a provider.
 func (h *Handler) OAuthBegin(ctx context.Context, req *authv1.OAuthBeginRequest) (*authv1.OAuthBeginResponse, error) {
 	if req.GetProvider() == "" {
 		return nil, status.Error(codes.InvalidArgument, "provider is required")
@@ -105,6 +118,8 @@ func (h *Handler) OAuthBegin(ctx context.Context, req *authv1.OAuthBeginRequest)
 	}, nil
 }
 
+// LoginOAuth handles the LoginOAuth RPC, completing the OAuth code exchange and
+// returning a Bearer token pair. Requires provider and code.
 func (h *Handler) LoginOAuth(ctx context.Context, req *authv1.LoginOAuthRequest) (*authv1.Token, error) {
 	if req.GetProvider() == "" || req.GetCode() == "" {
 		return nil, status.Error(codes.InvalidArgument, "provider and code are required")

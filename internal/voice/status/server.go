@@ -15,6 +15,10 @@ import (
 	"go.uber.org/zap"
 )
 
+// Participant is one member's live state in a voice room, as exposed by the
+// status API. SSRC is the audio stream; VideoSSRC/ScreenSSRC are zero (and
+// omitted) when that stream is inactive. Quality/RTTMs/PacketLoss/JitterMs come
+// from the session's latest quality snapshot and are omitted when zero.
 type Participant struct {
 	UserID        string  `json:"user_id"`
 	SSRC          uint32  `json:"ssrc"`
@@ -31,12 +35,16 @@ type Participant struct {
 	JoinedAt      string  `json:"joined_at"`
 }
 
+// RoomInfo describes a room and its participants. In the room-list view
+// Participants is left nil and only Count is populated; the detail view fills both.
 type RoomInfo struct {
 	RoomID       string        `json:"room_id"`
 	Participants []Participant `json:"participants"`
 	Count        int           `json:"count"`
 }
 
+// ServerInfo is the /stats payload: uptime, aggregate room/session counts, a
+// per-room occupancy map, and the optional telemetry Stats snapshot.
 type ServerInfo struct {
 	Version        string           `json:"version"`
 	Uptime         string           `json:"uptime"`
@@ -46,6 +54,9 @@ type ServerInfo struct {
 	Metrics        *telemetry.Stats `json:"metrics,omitempty"`
 }
 
+// Server is the read-only HTTP status API for operators/dashboards, serving
+// room and stats views over the live session manager. All data endpoints are
+// JWT-gated via auth; /health is open.
 type Server struct {
 	sessions  *session.Manager
 	jwt       *jwt.Manager
@@ -54,10 +65,15 @@ type Server struct {
 	startTime time.Time
 }
 
+// NewServer wires the status API to the session manager, JWT validator, and
+// (optionally nil) metrics, starting its uptime clock now.
 func NewServer(sm *session.Manager, jm *jwt.Manager, m *telemetry.Metrics, l *zap.Logger) *Server {
 	return &Server{sessions: sm, jwt: jm, metrics: m, logger: l, startTime: time.Now()}
 }
 
+// Start serves the status API (CORS-wrapped, 10s read/write timeouts) on port,
+// blocking until ctx is cancelled — then it drains with a 5s Shutdown timeout —
+// or ListenAndServe fails. Returns nil on clean context-cancelled shutdown.
 func (s *Server) Start(ctx context.Context, port int) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/voice/rooms", s.auth(s.listRooms))
@@ -85,6 +101,8 @@ func (s *Server) Start(ctx context.Context, port int) error {
 	}
 }
 
+// cors wraps next with permissive CORS (any origin, GET/OPTIONS) and short-circuits
+// preflight OPTIONS with 204, so browser dashboards can call the API cross-origin.
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -98,6 +116,8 @@ func cors(next http.Handler) http.Handler {
 	})
 }
 
+// auth wraps a handler to require a valid Bearer access token, responding 401
+// when the Authorization header is missing or the token fails validation.
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		h := r.Header.Get("Authorization")
@@ -114,6 +134,8 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// listRooms returns every active room with only its participant count (no
+// per-participant detail); use roomDetail for members.
 func (s *Server) listRooms(w http.ResponseWriter, r *http.Request) {
 	rooms := s.sessions.GetAllRooms()
 	result := make([]RoomInfo, 0, len(rooms))
@@ -124,6 +146,9 @@ func (s *Server) listRooms(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, result)
 }
 
+// roomDetail returns full participant state for the room id in the trailing path
+// segment, responding 400 when the id is empty. Returns an empty participant
+// list (not 404) for an unknown room.
 func (s *Server) roomDetail(w http.ResponseWriter, r *http.Request) {
 	roomID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/voice/rooms/"), "/")
 	if roomID == "" {
@@ -153,6 +178,8 @@ func (s *Server) roomDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, RoomInfo{RoomID: roomID, Participants: ps, Count: len(ps)})
 }
 
+// stats returns server-wide occupancy (room count, total sessions, per-room
+// counts) plus the telemetry Stats snapshot when metrics is configured.
 func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	rooms := s.sessions.GetAllRooms()
 	rc := make(map[string]int, len(rooms))
@@ -170,15 +197,20 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, info)
 }
 
+// health is the unauthenticated liveness endpoint; it always reports ok with the
+// build version and performs no dependency checks.
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok", "version": version.Voice()})
 }
 
+// writeJSON sets the JSON content type and encodes v; encoding errors are ignored
+// since the status may already be committed.
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeErr writes a {"error": msg} JSON body with the given HTTP status code.
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)

@@ -11,11 +11,14 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// Service coordinates read tracking on top of the Repository and broadcasts read
+// receipts and unread-count updates over the hub.
 type Service struct {
 	repo *Repository
 	hub  *events.Hub
 }
 
+// NewService wires the read-tracking Service. A nil hub disables broadcasts.
 func NewService(repo *Repository, hub *events.Hub) *Service {
 	return &Service{
 		repo: repo,
@@ -23,6 +26,10 @@ func NewService(repo *Repository, hub *events.Hub) *Service {
 	}
 }
 
+// MarkRoomAsRead advances the user's last-read position in a room, then returns
+// the resulting last-read message ID and unread count. As side effects it
+// broadcasts a MessageRead event to the room and an UnreadCountUpdated event to
+// the user. The stored position only moves forward (see repo.MarkRoomAsRead).
 func (s *Service) MarkRoomAsRead(ctx context.Context, userID, roomID uuid.UUID, messageID int64) (int64, int32, error) {
 	if err := s.repo.MarkRoomAsRead(ctx, userID, roomID, messageID); err != nil {
 		return 0, 0, err
@@ -58,6 +65,10 @@ func (s *Service) MarkRoomAsRead(ctx context.Context, userID, roomID uuid.UUID, 
 	return status.LastReadMessageID, unreadCount, nil
 }
 
+// MarkDMAsRead advances the user's last-read position in a DM channel and returns
+// the resulting last-read ID and unread count. It broadcasts a MessageRead event
+// to the other participants only (not the reader). Unlike MarkRoomAsRead it does
+// not emit an UnreadCountUpdated event.
 func (s *Service) MarkDMAsRead(ctx context.Context, userID, channelID uuid.UUID, messageID int64) (int64, int32, error) {
 	if err := s.repo.MarkDMAsRead(ctx, userID, channelID, messageID); err != nil {
 		return 0, 0, err
@@ -96,6 +107,8 @@ func (s *Service) MarkDMAsRead(ctx context.Context, userID, channelID uuid.UUID,
 	return status.LastReadMessageID, unreadCount, nil
 }
 
+// GetRoomLastReadMessageID returns the user's last-read message ID for a room, or
+// 0 if they have never read it.
 func (s *Service) GetRoomLastReadMessageID(ctx context.Context, userID, roomID uuid.UUID) (int64, error) {
 	status, err := s.repo.GetRoomReadStatus(ctx, userID, roomID)
 	if err != nil {
@@ -104,6 +117,8 @@ func (s *Service) GetRoomLastReadMessageID(ctx context.Context, userID, roomID u
 	return status.LastReadMessageID, nil
 }
 
+// GetDMLastReadMessageID returns the user's last-read message ID for a DM channel,
+// or 0 if they have never read it.
 func (s *Service) GetDMLastReadMessageID(ctx context.Context, userID, channelID uuid.UUID) (int64, error) {
 	status, err := s.repo.GetDMReadStatus(ctx, userID, channelID)
 	if err != nil {
@@ -112,6 +127,8 @@ func (s *Service) GetDMLastReadMessageID(ctx context.Context, userID, channelID 
 	return status.LastReadMessageID, nil
 }
 
+// GetAllRoomUnreadCounts returns per-room unread info for the user plus the summed
+// total unread count across all their rooms.
 func (s *Service) GetAllRoomUnreadCounts(ctx context.Context, userID uuid.UUID) ([]RoomUnreadInfo, int32, error) {
 	infos, err := s.repo.GetAllRoomUnreadCounts(ctx, userID)
 	if err != nil {
@@ -126,6 +143,8 @@ func (s *Service) GetAllRoomUnreadCounts(ctx context.Context, userID uuid.UUID) 
 	return infos, total, nil
 }
 
+// GetAllDMUnreadCounts returns per-channel unread info for the user plus the
+// summed total unread count across all their DM channels.
 func (s *Service) GetAllDMUnreadCounts(ctx context.Context, userID uuid.UUID) ([]DMUnreadInfo, int32, error) {
 	infos, err := s.repo.GetAllDMUnreadCounts(ctx, userID)
 	if err != nil {
@@ -140,6 +159,9 @@ func (s *Service) GetAllDMUnreadCounts(ctx context.Context, userID uuid.UUID) ([
 	return infos, total, nil
 }
 
+// BroadcastUnreadUpdate sends an UnreadCountUpdated event only to the given user.
+// Pass whichever of roomID/channelID applies (the other nil) to scope the event;
+// it is a no-op when the hub is nil.
 func (s *Service) BroadcastUnreadUpdate(ctx context.Context, userID uuid.UUID, roomID *uuid.UUID, channelID *uuid.UUID, unreadCount int32, lastMessageID int64) {
 	if s.hub == nil {
 		return

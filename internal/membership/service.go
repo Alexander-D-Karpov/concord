@@ -16,12 +16,30 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-type Service struct {
-	roomRepo *rooms.Repository
-	hub      *events.Hub
-	cache    *cache.AsidePattern
+// KeyRotator rotates a room's voice encryption key on membership change so a
+// removed member can no longer decrypt future media. *voiceassign.Service
+// satisfies it.
+type KeyRotator interface {
+	RotateRoomKey(ctx context.Context, roomID string) error
 }
 
+// Service holds the invite and membership business logic. It has no repository of
+// its own — it persists through rooms.Repository — so after any mutation it must
+// invalidate the rooms membership cache. keyRotator (optional, injected via
+// SetKeyRotator) rotates the room's voice key when membership shrinks.
+type Service struct {
+	roomRepo   *rooms.Repository
+	hub        *events.Hub
+	cache      *cache.AsidePattern
+	keyRotator KeyRotator
+}
+
+// SetKeyRotator injects the voice key rotator used when a member is removed;
+// until set, removals skip key rotation.
+func (s *Service) SetKeyRotator(kr KeyRotator) { s.keyRotator = kr }
+
+// RoomInvite is this package's invite shape (mirrors rooms.RoomInvite). Status is
+// one of "pending"/"accepted"/"rejected".
 type RoomInvite struct {
 	ID            uuid.UUID
 	RoomID        uuid.UUID
@@ -32,6 +50,8 @@ type RoomInvite struct {
 	UpdatedAt     time.Time
 }
 
+// RoomInviteWithUsers is an invite denormalized with the room name and both
+// users' profiles (this package's mirror of rooms.RoomInviteWithUsers).
 type RoomInviteWithUsers struct {
 	ID                     uuid.UUID
 	RoomID                 uuid.UUID
@@ -49,10 +69,30 @@ type RoomInviteWithUsers struct {
 	InviterAvatarURL       string
 }
 
+// NewService builds the membership Service. Wire a key rotator afterward via
+// SetKeyRotator; a nil aside disables cache invalidation.
 func NewService(roomRepo *rooms.Repository, hub *events.Hub, aside *cache.AsidePattern) *Service {
 	return &Service{roomRepo: roomRepo, hub: hub, cache: aside}
 }
 
+// invalidateMembership drops the cached membership and user-rooms-list keys for a
+// (room, user) pair — the rooms package owns these keys, so membership mutations
+// must clear them here. No-op without a cache.
+func (s *Service) invalidateMembership(ctx context.Context, roomID, userID uuid.UUID) {
+	if s.cache == nil {
+		return
+	}
+	_ = s.cache.Invalidate(ctx,
+		fmt.Sprintf("m:%s:%s", roomID, userID),
+		fmt.Sprintf("u:%s:rooms", userID),
+	)
+}
+
+// CreateRoomInvite invites userID to a room on behalf of the caller. The caller
+// must be a member (Forbidden otherwise), cannot invite themselves, cannot invite
+// an existing member (Conflict), and cannot duplicate a still-pending invite
+// (Conflict). On success it broadcasts RoomInviteCreated to the invited user and
+// returns the denormalized invite.
 func (s *Service) CreateRoomInvite(ctx context.Context, roomID, userID string) (*RoomInviteWithUsers, error) {
 	currentUserID := interceptor.GetUserID(ctx)
 	if currentUserID == "" {
@@ -78,12 +118,21 @@ func (s *Service) CreateRoomInvite(ctx context.Context, roomID, userID string) (
 		return nil, errors.BadRequest("cannot invite yourself")
 	}
 
-	_, err = s.roomRepo.GetMember(ctx, roomUUID, inviterUUID)
+	inviter, err := s.roomRepo.GetMember(ctx, roomUUID, inviterUUID)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil, errors.Forbidden("not a member of this room")
 		}
 		return nil, errors.Internal("failed to check membership", err)
+	}
+
+	// Honor the room's who_can_invite policy.
+	settings, err := s.roomRepo.GetSettings(ctx, roomUUID)
+	if err != nil {
+		return nil, errors.Internal("failed to load room settings", err)
+	}
+	if settings.WhoCanInvite == "moderator" && inviter.Role != "moderator" && inviter.Role != "admin" {
+		return nil, errors.Forbidden("only moderators can invite to this room")
 	}
 
 	_, err = s.roomRepo.GetMember(ctx, roomUUID, invitedUUID)
@@ -128,6 +177,11 @@ func (s *Service) CreateRoomInvite(ctx context.Context, roomID, userID string) (
 	return toRoomInviteWithUsers(inviteWithUsers), nil
 }
 
+// AcceptRoomInvite accepts a pending invite addressed to the caller: it adds them
+// as a "member", marks the invite accepted, and invalidates their room-list and
+// membership caches. It then triggers room-join sync and broadcasts
+// RoomInviteUpdated (to the invitee) and MemberJoined (to the room). Only the
+// invited user may accept (Forbidden), and only pending invites (Conflict).
 func (s *Service) AcceptRoomInvite(ctx context.Context, inviteID string) (*rooms.Member, error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -157,7 +211,27 @@ func (s *Service) AcceptRoomInvite(ctx context.Context, inviteID string) (*rooms
 		return nil, errors.Conflict("invite already processed")
 	}
 
-	if err := s.roomRepo.AddMember(ctx, invite.RoomID, userUUID, "member"); err != nil {
+	// A banned user must not be able to rejoin by accepting an invite.
+	if banned, err := s.roomRepo.IsBanned(ctx, invite.RoomID, userUUID); err != nil {
+		return nil, errors.Internal("failed to check ban status", err)
+	} else if banned {
+		return nil, errors.Forbidden("you are banned from this room")
+	}
+
+	// Add the member, enforcing the room's member cap atomically (0 = unlimited).
+	settings, err := s.roomRepo.GetSettings(ctx, invite.RoomID)
+	if err != nil {
+		return nil, errors.Internal("failed to load room settings", err)
+	}
+	if settings.MemberCap > 0 {
+		added, err := s.roomRepo.AddMemberIfBelowCap(ctx, invite.RoomID, userUUID, "member", settings.MemberCap)
+		if err != nil {
+			return nil, errors.Internal("failed to add member", err)
+		}
+		if !added {
+			return nil, errors.Forbidden("room is full")
+		}
+	} else if err := s.roomRepo.AddMember(ctx, invite.RoomID, userUUID, "member"); err != nil {
 		return nil, errors.Internal("failed to add member", err)
 	}
 
@@ -167,7 +241,10 @@ func (s *Service) AcceptRoomInvite(ctx context.Context, inviteID string) (*rooms
 
 	// invalidate cached room list for the user who just joined
 	if s.cache != nil {
-		_ = s.cache.Invalidate(ctx, fmt.Sprintf("u:%s:rooms", userID))
+		_ = s.cache.Invalidate(ctx,
+			fmt.Sprintf("u:%s:rooms", userID),
+			fmt.Sprintf("m:%s:%s", invite.RoomID, userID),
+		)
 	}
 
 	updatedInvite, err := s.roomRepo.GetRoomInviteWithUsers(ctx, inviteUUID)
@@ -208,6 +285,9 @@ func (s *Service) AcceptRoomInvite(ctx context.Context, inviteID string) (*rooms
 	return s.roomRepo.GetMember(ctx, invite.RoomID, userUUID)
 }
 
+// RejectRoomInvite lets the invited user decline a pending invite (setting its
+// status to "rejected") and broadcasts RoomInviteUpdated. Only the invitee may
+// reject (Forbidden), and only a pending invite (Conflict).
 func (s *Service) RejectRoomInvite(ctx context.Context, inviteID string) error {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -260,6 +340,9 @@ func (s *Service) RejectRoomInvite(ctx context.Context, inviteID string) error {
 	return nil
 }
 
+// CancelRoomInvite lets the inviter withdraw a pending invite they sent (it is
+// marked "rejected" in the DB) and broadcasts RoomInviteUpdated. Only the
+// original inviter may cancel (Forbidden), and only a pending invite (Conflict).
 func (s *Service) CancelRoomInvite(ctx context.Context, inviteID string) error {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -312,6 +395,8 @@ func (s *Service) CancelRoomInvite(ctx context.Context, inviteID string) error {
 	return nil
 }
 
+// ListRoomInvites returns the caller's pending invites split into incoming
+// (addressed to them) and outgoing (sent by them), each with joined profiles.
 func (s *Service) ListRoomInvites(ctx context.Context) (incoming, outgoing []*RoomInviteWithUsers, err error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -346,6 +431,11 @@ func (s *Service) ListRoomInvites(ctx context.Context) (incoming, outgoing []*Ro
 	return incoming, outgoing, nil
 }
 
+// Remove kicks a user from a room. Only an admin caller may do so (Forbidden
+// otherwise). After deleting the membership it rotates the room's voice key (so
+// the removed member can no longer decrypt future media), invalidates the target
+// user's room-list and membership caches, notifies them via room-leave sync, and
+// asynchronously broadcasts MemberRemoved to the room.
 func (s *Service) Remove(ctx context.Context, roomID, userID string) error {
 	callerID := interceptor.GetUserID(ctx)
 	if callerID == "" {
@@ -380,6 +470,11 @@ func (s *Service) Remove(ctx context.Context, roomID, userID string) error {
 		return err
 	}
 
+	// Rotate the room's voice key so the removed member can't decrypt future media.
+	if s.keyRotator != nil {
+		_ = s.keyRotator.RotateRoomKey(ctx, roomID)
+	}
+
 	if s.cache != nil {
 		_ = s.cache.Invalidate(ctx,
 			fmt.Sprintf("u:%s:rooms", userID),
@@ -403,6 +498,10 @@ func (s *Service) Remove(ctx context.Context, roomID, userID string) error {
 	return nil
 }
 
+// SetRole changes a member's role (role string mapped to the proto enum for the
+// broadcast). Only an admin caller may do so (Forbidden otherwise). It
+// invalidates the target's membership cache and asynchronously broadcasts
+// RoleChanged to the room.
 func (s *Service) SetRole(ctx context.Context, roomID, userID, role string) error {
 	callerID := interceptor.GetUserID(ctx)
 	if callerID == "" {
@@ -437,6 +536,9 @@ func (s *Service) SetRole(ctx context.Context, roomID, userID, role string) erro
 		return err
 	}
 
+	if s.cache != nil {
+		_ = s.cache.Invalidate(ctx, fmt.Sprintf("m:%s:%s", roomID, userID))
+	}
 	protoRole := commonv1.Role_ROLE_MEMBER
 	switch role {
 	case "admin":
@@ -460,6 +562,8 @@ func (s *Service) SetRole(ctx context.Context, roomID, userID, role string) erro
 	return nil
 }
 
+// SetNickname sets the caller's own nickname in a room (any member may set their
+// own) and asynchronously broadcasts MemberNicknameChanged to the room.
 func (s *Service) SetNickname(ctx context.Context, roomID, nickname string) error {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -495,6 +599,7 @@ func (s *Service) SetNickname(ctx context.Context, roomID, nickname string) erro
 	return nil
 }
 
+// GetMember returns the caller's own membership record in a room.
 func (s *Service) GetMember(ctx context.Context, roomID string) (*rooms.Member, error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -514,6 +619,8 @@ func (s *Service) GetMember(ctx context.Context, roomID string) (*rooms.Member, 
 	return s.roomRepo.GetMember(ctx, roomUUID, userUUID)
 }
 
+// ListMembers returns all members of a room. It does not check the caller's
+// membership.
 func (s *Service) ListMembers(ctx context.Context, roomID string) ([]*rooms.Member, error) {
 	roomUUID, err := uuid.Parse(roomID)
 	if err != nil {
@@ -523,6 +630,8 @@ func (s *Service) ListMembers(ctx context.Context, roomID string) ([]*rooms.Memb
 	return s.roomRepo.ListMembers(ctx, roomUUID)
 }
 
+// toRoomInviteWithUsers maps the rooms package's invite-with-users record into
+// this package's mirror type field-for-field.
 func toRoomInviteWithUsers(inv *rooms.RoomInviteWithUsers) *RoomInviteWithUsers {
 	return &RoomInviteWithUsers{
 		ID:                     inv.ID,

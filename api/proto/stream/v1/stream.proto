@@ -73,12 +73,40 @@ message MemberNicknameChanged {
   string new_nickname = 3;
 }
 
+message VoiceParticipantState {
+  string user_id = 1;
+  bool muted = 2;
+  bool video_enabled = 3;
+  bool screen_sharing = 4;
+  bool speaking = 5;
+  google.protobuf.Timestamp joined_at = 6;
+  uint32 ssrc = 7;
+  uint32 video_ssrc = 8;
+  uint32 screen_ssrc = 9;
+}
+
+// Exactly one of room_id / channel_id is set.
+message RoomVoiceState {
+  string room_id = 1;
+  string channel_id = 2;
+  repeated VoiceParticipantState participants = 3;
+  bool self_connected = 4;
+}
+
+// Authoritative full voice state, pushed once per stream connect.
+// Rooms with no active voice session are omitted; an empty `rooms` list
+// means "no voice anywhere", not "unknown".
+message VoiceStateSnapshot {
+  repeated RoomVoiceState rooms = 1;
+}
+
 message VoiceStateChanged {
   string room_id = 1;
   string user_id = 2;
   bool muted = 3;
   bool video_enabled = 4;
   bool speaking = 5;
+  bool screen_sharing = 6;
 }
 
 message RoomUpdated {
@@ -100,11 +128,26 @@ message VoiceUserJoined {
   string room_id = 1;
   string user_id = 2;
   bool audio_only = 3;
+  VoiceParticipantState participant = 4;
 }
 
 message VoiceUserLeft {
   string room_id = 1;
   string user_id = 2;
+}
+
+message VoiceServerChanged {
+  string room_id = 1;
+  string user_id = 2;
+  string reason = 3;
+}
+
+message VoiceKeyRotated {
+  string room_id = 1;
+  bytes key_id = 2;
+  bytes key_material = 3;
+  bytes nonce_base = 4;
+  string aead = 5;
 }
 
 message FriendRequestCreated {
@@ -199,7 +242,6 @@ message UnreadCountUpdated {
   string last_message_id = 4;
 }
 
-// Added DM Call events
 message DMCallStarted {
   string channel_id = 1;
   string caller_id = 2;
@@ -209,6 +251,20 @@ message DMCallStarted {
 message DMCallEnded {
   string channel_id = 1;
   string user_id = 2;
+}
+
+message PollVoteUpdated {
+  string poll_id = 1;
+  concord.common.v1.Poll poll = 2;
+}
+
+message DraftUpdated {
+  concord.common.v1.Draft draft = 1;
+}
+
+message ScheduledMessageSent {
+  string scheduled_id = 1;
+  concord.common.v1.Message message = 2;
 }
 
 message ServerEvent {
@@ -237,6 +293,9 @@ message ServerEvent {
     ProfileUpdated profile_updated = 51;
     VoiceUserJoined voice_user_joined = 60;
     VoiceUserLeft voice_user_left = 61;
+    VoiceStateSnapshot voice_state_snapshot = 62;
+    VoiceServerChanged voice_server_changed = 63;
+    VoiceKeyRotated voice_key_rotated = 64;
     FriendRequestCreated friend_request_created = 70;
     FriendRequestUpdated friend_request_updated = 71;
     FriendRemoved friend_removed = 72;
@@ -248,9 +307,11 @@ message ServerEvent {
     TypingStopped typing_stopped = 91;
     MessageRead message_read = 92;
     UnreadCountUpdated unread_count_updated = 93;
-    
     DMCallStarted dm_call_started = 94;
     DMCallEnded dm_call_ended = 95;
+    PollVoteUpdated poll_vote_updated = 96;
+    DraftUpdated draft_updated = 97;
+    ScheduledMessageSent scheduled_message_sent = 98;
   }
 }
 

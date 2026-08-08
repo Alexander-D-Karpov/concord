@@ -12,6 +12,9 @@ import (
 	"time"
 )
 
+// Advertised is the set of addresses a server will advertise to clients, along
+// with how the public host was determined (Source) and any operator-facing
+// Notes (e.g. NAT warnings).
 type Advertised struct {
 	PublicHost string // user-configured domain or detected public IP (if any)
 	LANHost    string // local/LAN IP fallback
@@ -20,6 +23,14 @@ type Advertised struct {
 	Notes      []string
 }
 
+// ComputeAdvertised determines the addresses to advertise for port. The public
+// host is resolved by precedence: userConfiguredHost, then the
+// CONCORD_PUBLIC_HOST env var, then an outbound HTTP call to a public-IP echo
+// service. The LAN host is detected via an outbound-route probe with a
+// private-IP fallback, ultimately 127.0.0.1. It appends explanatory Notes when
+// no public host is found or when udpBindHost is a wildcard. WARNING: this makes
+// real network calls (outbound HTTP and a UDP dial), so it can block up to a few
+// seconds; ctx bounds the HTTP lookups.
 func ComputeAdvertised(ctx context.Context, userConfiguredHost, udpBindHost string, port int) Advertised {
 	adv := Advertised{Port: port}
 
@@ -62,6 +73,8 @@ func ComputeAdvertised(ctx context.Context, userConfiguredHost, udpBindHost stri
 	return adv
 }
 
+// trimScheme strips a leading URL scheme (http/https/udp/tcp) and any trailing
+// slash from h, leaving a bare host.
 func trimScheme(h string) string {
 	h = strings.TrimSpace(h)
 	h = strings.TrimPrefix(h, "https://")
@@ -71,6 +84,9 @@ func trimScheme(h string) string {
 	return strings.TrimSuffix(h, "/")
 }
 
+// stripPort removes a trailing ":port" suffix from hostWithPort, but only when
+// the segment after the last colon is numeric, so bare IPv6 addresses are left
+// intact.
 func stripPort(hostWithPort string) string {
 	if idx := strings.LastIndex(hostWithPort, ":"); idx != -1 {
 		potentialPort := hostWithPort[idx+1:]
@@ -81,11 +97,18 @@ func stripPort(hostWithPort string) string {
 	return hostWithPort
 }
 
+// isAllInterfaces reports whether h is a wildcard/all-interfaces bind address
+// ("", 0.0.0.0, ::, [::], or localhost), which cannot be advertised to remote
+// clients as-is.
 func isAllInterfaces(h string) bool {
 	h = strings.TrimSpace(strings.ToLower(h))
 	return h == "" || h == "0.0.0.0" || h == "::" || h == "[::]" || h == "localhost"
 }
 
+// detectPublicIP queries external IP-echo services (ipify, icanhazip) over HTTPS
+// with a 2s per-request timeout, returning the first valid IP. It makes real
+// outbound network calls and returns an error if none of the endpoints are
+// reachable or return a parseable IP.
 func detectPublicIP(ctx context.Context) (string, error) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	endpoints := []string{
@@ -113,6 +136,10 @@ func detectPublicIP(ctx context.Context) (string, error) {
 	return "", errors.New("no public IP endpoint reachable")
 }
 
+// detectLANIPPreferOutbound finds the host's primary LAN IP by opening a UDP
+// socket "toward" 1.1.1.1 and reading its local address. No packets are sent
+// (UDP dial only selects a route), but it does require a usable network route;
+// it returns an error if none exists.
 func detectLANIPPreferOutbound() (string, error) {
 	conn, err := net.Dial("udp", "1.1.1.1:80")
 	if err != nil {
@@ -132,6 +159,9 @@ func detectLANIPPreferOutbound() (string, error) {
 	return udpAddr.IP.String(), nil
 }
 
+// firstPrivateIPv4 scans network interfaces (skipping down and loopback ones)
+// and returns the first private-range IPv4 address found, used as a fallback
+// when the outbound-route probe fails.
 func firstPrivateIPv4() (string, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -156,6 +186,8 @@ func firstPrivateIPv4() (string, error) {
 	return "", errors.New("no private IPv4 found")
 }
 
+// isPrivateIPv4 reports whether ip is in an RFC 1918 private range (10/8,
+// 172.16/12, or 192.168/16). Returns false for non-IPv4 addresses.
 func isPrivateIPv4(ip net.IP) bool {
 	ip4 := ip.To4()
 	if ip4 == nil {

@@ -1,0 +1,264 @@
+syntax = "proto3";
+
+package concord.features.v1;
+
+option go_package = "github.com/Alexander-D-Karpov/concord/api/gen/go/features/v1;featuresv1";
+
+import "google/api/annotations.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+import "common/v1/types.proto";
+
+message ForwardMessagesRequest {
+  repeated string message_ids = 1;
+  string source_room_id = 2;
+  string source_channel_id = 3;
+  string destination_room_id = 4;
+  string destination_channel_id = 5;
+  bool drop_author = 6;
+}
+
+message ForwardMessagesResponse {
+  repeated concord.common.v1.Message messages = 1;
+}
+
+message ScheduleMessageRequest {
+  string room_id = 1;
+  string channel_id = 2;
+  string content = 3;
+  string reply_to_id = 4;
+  google.protobuf.Timestamp scheduled_for = 5;
+}
+
+message GetScheduledMessagesRequest {
+  string room_id = 1;
+  string channel_id = 2;
+}
+
+message GetScheduledMessagesResponse {
+  repeated concord.common.v1.ScheduledMessage messages = 1;
+}
+
+message EditScheduledMessageRequest {
+  string id = 1;
+  string content = 2;
+  google.protobuf.Timestamp scheduled_for = 3;
+}
+
+message CancelScheduledMessageRequest {
+  string id = 1;
+}
+
+message SaveBookmarkRequest {
+  string message_id = 1;
+  string room_id = 2;
+  string channel_id = 3;
+  string note = 4;
+  repeated string tags = 5;
+}
+
+message UnsaveBookmarkRequest {
+  string message_id = 1;
+}
+
+message GetBookmarksRequest {
+  repeated string tags = 1;
+  string search_query = 2;
+  int32 limit = 3;
+  string cursor = 4;
+}
+
+message GetBookmarksResponse {
+  repeated concord.common.v1.Bookmark bookmarks = 1;
+  bool has_more = 2;
+}
+
+message GetEditHistoryRequest {
+  string message_id = 1;
+  string room_id = 2;
+}
+
+message GetEditHistoryResponse {
+  repeated concord.common.v1.EditHistoryEntry entries = 1;
+}
+
+message CreatePollRequest {
+  string room_id = 1;
+  string channel_id = 2;
+  string question = 3;
+  repeated string options = 4;
+  int32 poll_type = 5;
+  bool is_anonymous = 6;
+  bool allows_multiple = 7;
+  int32 correct_option = 8;
+  string explanation = 9;
+  int32 close_after_seconds = 10;
+}
+
+message CreatePollResponse {
+  concord.common.v1.Message message = 1;
+}
+
+message VotePollRequest {
+  string poll_id = 1;
+  repeated int32 option_ids = 2;
+}
+
+message VotePollResponse {
+  concord.common.v1.Poll poll = 1;
+}
+
+message ClosePollRequest {
+  string poll_id = 1;
+}
+
+message SaveDraftRequest {
+  string room_id = 1;
+  string channel_id = 2;
+  string content = 3;
+  string reply_to_message_id = 4;
+}
+
+message GetDraftsRequest {}
+
+message GetDraftsResponse {
+  repeated concord.common.v1.Draft drafts = 1;
+}
+
+message ClearDraftRequest {
+  string room_id = 1;
+  string channel_id = 2;
+}
+
+message SetNotificationOverrideRequest {
+  string room_id = 1;
+  string channel_id = 2;
+  string override_level = 3;
+  int64 mute_duration_seconds = 4;
+  bool suppress_everyone = 5;
+}
+
+message GetNotificationOverridesRequest {}
+
+message GetNotificationOverridesResponse {
+  repeated concord.common.v1.NotificationOverride overrides = 1;
+}
+
+message GetChannelMediaRequest {
+  string room_id = 1;
+  string channel_id = 2;
+  int32 media_type = 3;
+  int32 limit = 4;
+  string cursor = 5;
+}
+
+message GetChannelMediaResponse {
+  repeated concord.common.v1.MediaItem items = 1;
+  bool has_more = 2;
+}
+
+message SearchGifRequest {
+  string query = 1;
+  int32 limit = 2;
+  string offset = 3;
+}
+
+message GifResult {
+  string id = 1;
+  string title = 2;
+  string url = 3;
+  string preview_url = 4;
+  int32 width = 5;
+  int32 height = 6;
+}
+
+message SearchGifResponse {
+  repeated GifResult results = 1;
+  string next_offset = 2;
+}
+
+message GetStickerPacksRequest {}
+
+message GetStickerPacksResponse {
+  repeated concord.common.v1.StickerPack packs = 1;
+}
+
+message SetSlowModeRequest {
+  string room_id = 1;
+  int32 interval_seconds = 2;
+}
+
+message SuppressLinkPreviewRequest {
+  string message_id = 1;
+  string room_id = 2;
+  string url_hash = 3;
+}
+
+service FeaturesService {
+  rpc ForwardMessages(ForwardMessagesRequest) returns (ForwardMessagesResponse) {
+    option (google.api.http) = { post: "/v1/messages/forward" body: "*" };
+  }
+  rpc ScheduleMessage(ScheduleMessageRequest) returns (concord.common.v1.ScheduledMessage) {
+    option (google.api.http) = { post: "/v1/messages/schedule" body: "*" };
+  }
+  rpc GetScheduledMessages(GetScheduledMessagesRequest) returns (GetScheduledMessagesResponse) {
+    option (google.api.http) = { get: "/v1/messages/scheduled" };
+  }
+  rpc EditScheduledMessage(EditScheduledMessageRequest) returns (concord.common.v1.ScheduledMessage) {
+    option (google.api.http) = { patch: "/v1/messages/scheduled/{id}" body: "*" };
+  }
+  rpc CancelScheduledMessage(CancelScheduledMessageRequest) returns (google.protobuf.Empty) {
+    option (google.api.http) = { delete: "/v1/messages/scheduled/{id}" };
+  }
+  rpc SaveBookmark(SaveBookmarkRequest) returns (concord.common.v1.Bookmark) {
+    option (google.api.http) = { post: "/v1/bookmarks" body: "*" };
+  }
+  rpc UnsaveBookmark(UnsaveBookmarkRequest) returns (google.protobuf.Empty) {
+    option (google.api.http) = { delete: "/v1/bookmarks/{message_id}" };
+  }
+  rpc GetBookmarks(GetBookmarksRequest) returns (GetBookmarksResponse) {
+    option (google.api.http) = { get: "/v1/bookmarks" };
+  }
+  rpc GetEditHistory(GetEditHistoryRequest) returns (GetEditHistoryResponse) {
+    option (google.api.http) = { get: "/v1/rooms/{room_id}/messages/{message_id}/history" };
+  }
+  rpc CreatePoll(CreatePollRequest) returns (CreatePollResponse) {
+    option (google.api.http) = { post: "/v1/polls" body: "*" };
+  }
+  rpc VotePoll(VotePollRequest) returns (VotePollResponse) {
+    option (google.api.http) = { post: "/v1/polls/{poll_id}/vote" body: "*" };
+  }
+  rpc ClosePoll(ClosePollRequest) returns (google.protobuf.Empty) {
+    option (google.api.http) = { post: "/v1/polls/{poll_id}/close" };
+  }
+  rpc SaveDraft(SaveDraftRequest) returns (concord.common.v1.Draft) {
+    option (google.api.http) = { put: "/v1/drafts" body: "*" };
+  }
+  rpc GetDrafts(GetDraftsRequest) returns (GetDraftsResponse) {
+    option (google.api.http) = { get: "/v1/drafts" };
+  }
+  rpc ClearDraft(ClearDraftRequest) returns (google.protobuf.Empty) {
+    option (google.api.http) = { delete: "/v1/drafts" };
+  }
+  rpc SetNotificationOverride(SetNotificationOverrideRequest) returns (google.protobuf.Empty) {
+    option (google.api.http) = { put: "/v1/notifications/override" body: "*" };
+  }
+  rpc GetNotificationOverrides(GetNotificationOverridesRequest) returns (GetNotificationOverridesResponse) {
+    option (google.api.http) = { get: "/v1/notifications/overrides" };
+  }
+  rpc GetChannelMedia(GetChannelMediaRequest) returns (GetChannelMediaResponse) {
+    option (google.api.http) = { get: "/v1/media" };
+  }
+  rpc SearchGif(SearchGifRequest) returns (SearchGifResponse) {
+    option (google.api.http) = { get: "/v1/gifs/search" };
+  }
+  rpc GetStickerPacks(GetStickerPacksRequest) returns (GetStickerPacksResponse) {
+    option (google.api.http) = { get: "/v1/stickers" };
+  }
+  rpc SetSlowMode(SetSlowModeRequest) returns (google.protobuf.Empty) {
+    option (google.api.http) = { put: "/v1/rooms/{room_id}/slowmode" body: "*" };
+  }
+  rpc SuppressLinkPreview(SuppressLinkPreviewRequest) returns (google.protobuf.Empty) {
+    option (google.api.http) = { post: "/v1/messages/{message_id}/suppress-preview" body: "*" };
+  }
+}

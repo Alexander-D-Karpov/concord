@@ -103,6 +103,20 @@ services:
       VOICE_HEARTBEAT_INTERVAL: ${VOICE_HEARTBEAT_INTERVAL:-30s}
       VOICE_CAPACITY: ${VOICE_CAPACITY:-1000}
 
+      # --- UDP transport mode ---
+      VOICE_UDP_PORT_COUNT: ${VOICE_UDP_PORT_COUNT:-50}
+      VOICE_STATUS_PORT: ${VOICE_STATUS_PORT:-9092}
+      # Single-port (SO_REUSEPORT) is the default: one public UDP port with an
+      # internal socket pool. For the legacy range set VOICE_SINGLE_PORT=false and
+      # VOICE_UDP_PUBLISH=50000-50049.
+      VOICE_SINGLE_PORT: ${VOICE_SINGLE_PORT:-true}
+      VOICE_PUBLIC_UDP_PORT: ${VOICE_PUBLIC_UDP_PORT:-50000}
+      VOICE_SOCKET_COUNT: ${VOICE_SOCKET_COUNT:-0}
+      # TCP/TLS fallback (0 disables)
+      VOICE_TCP_PORT: ${VOICE_TCP_PORT:-8443}
+      VOICE_TLS_CERT: ${VOICE_TLS_CERT:-}
+      VOICE_TLS_KEY: ${VOICE_TLS_KEY:-}
+
     ports:
       # Voice control (TCP). Exposed only locally for debugging / internal checks.
       - "127.0.0.1:${VOICE_CONTROL_HOST_PORT:-19001}:9001"
@@ -110,8 +124,11 @@ services:
       - "127.0.0.1:${VOICE_METRICS_HOST_PORT:-19101}:9101"
       # Health (TCP). Local only.
       - "127.0.0.1:${VOICE_HEALTH_HOST_PORT:-18082}:8082"
-      # UDP media range - PUBLIC
-      - "${VOICE_UDP_PORT_START:-50000}-${VOICE_UDP_PORT_END:-50049}:50000-50049/udp"
+      # UDP media - PUBLIC. Single port by default; for the legacy range set
+      # VOICE_UDP_PUBLISH=50000-50049 alongside VOICE_SINGLE_PORT=false.
+      - "${VOICE_UDP_PUBLISH:-50000}:${VOICE_UDP_PUBLISH:-50000}/udp"
+      # TCP/TLS fallback - PUBLIC (set VOICE_TCP_PORT=0 to disable the server).
+      - "${VOICE_TCP_HOST_PORT:-8443}:${VOICE_TCP_PORT:-8443}"
 
 volumes:
   postgres_data:

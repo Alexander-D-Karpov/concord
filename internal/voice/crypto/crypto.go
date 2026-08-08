@@ -3,94 +3,70 @@ package crypto
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"io"
 	"sync"
+
+	"golang.org/x/crypto/hkdf"
 )
 
 var (
-	ErrInvalidKey    = errors.New("invalid key size: expected 32 bytes")
+	// ErrInvalidKey is returned by NewCipher when the key is not KeySize bytes.
+	ErrInvalidKey = errors.New("invalid key size: expected 32 bytes")
+	// ErrDecryptFailed is returned when GCM authentication/decryption fails. It is
+	// deliberately opaque (no detail on why) to avoid leaking oracle information.
 	ErrDecryptFailed = errors.New("decryption failed")
-	ErrReplay        = errors.New("replay/duplicate packet")
-	ErrInvalidNonce  = errors.New("invalid nonce size")
+	// ErrReplay is returned when the replay filter rejects a packet whose counter
+	// was already seen or has fallen behind the sliding window.
+	ErrReplay = errors.New("replay/duplicate packet")
 )
 
 const (
-	NonceSize     = 12
+	// NonceSize is the full GCM nonce length: NonceBaseSize base bytes plus an
+	// 8-byte big-endian counter.
+	NonceSize = 12
+	// NonceBaseSize is the per-SSRC prefix (derived via HKDF) of each nonce.
 	NonceBaseSize = 4
-	KeySize       = 32
-	AuthTagSize   = 16
-	ReplayWindow  = 256
+	// KeySize is the required AES-256 key length in bytes.
+	KeySize = 32
+	// AuthTagSize is the GCM authentication tag appended to every ciphertext.
+	AuthTagSize = 16
+	// ReplayWindow is the number of counter positions tracked behind the highest
+	// seen counter; anything older is rejected as a replay.
+	ReplayWindow = 256
 )
 
+// Cipher wraps an AES-256-GCM AEAD. It is safe for concurrent use because the
+// nonce is supplied per call rather than held as state.
 type Cipher struct {
-	aead      cipher.AEAD
-	nonceBase [NonceBaseSize]byte
+	aead cipher.AEAD
 }
 
-func NewCipher(key []byte, nonceBase []byte) (*Cipher, error) {
+// NewCipher builds an AES-256-GCM Cipher from a 32-byte key, returning
+// ErrInvalidKey if the key length is wrong.
+func NewCipher(key []byte) (*Cipher, error) {
 	if len(key) != KeySize {
 		return nil, ErrInvalidKey
 	}
-
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
-
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, err
 	}
-
-	c := &Cipher{aead: aead}
-	if len(nonceBase) >= NonceBaseSize {
-		copy(c.nonceBase[:], nonceBase[:NonceBaseSize])
-	}
-
-	return c, nil
+	return &Cipher{aead: aead}, nil
 }
 
-func GenerateKey() ([]byte, error) {
-	key := make([]byte, KeySize)
-	if _, err := io.ReadFull(rand.Reader, key); err != nil {
-		return nil, err
-	}
-	return key, nil
-}
-
-func GenerateNonceBase() ([]byte, error) {
-	nonce := make([]byte, NonceBaseSize)
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
-	}
-	return nonce, nil
-}
-
-func RandomCounterStart() (uint64, error) {
-	var b [8]byte
-	if _, err := io.ReadFull(rand.Reader, b[:]); err != nil {
-		return 0, err
-	}
-	return binary.BigEndian.Uint64(b[:]), nil
-}
-
-func (c *Cipher) deriveNonce(counter uint64) []byte {
+// OpenWithBase opens a packet using an explicit per-stream nonce (nonceBase ‖
+// counter, 12 bytes total).
+func (c *Cipher) OpenWithBase(aad, ciphertext []byte, nonceBase [NonceBaseSize]byte, counter uint64) ([]byte, error) {
 	nonce := make([]byte, NonceSize)
-	copy(nonce[0:NonceBaseSize], c.nonceBase[:])
+	copy(nonce[0:NonceBaseSize], nonceBase[:])
 	binary.BigEndian.PutUint64(nonce[NonceBaseSize:], counter)
-	return nonce
-}
-
-func (c *Cipher) Seal(aad, plaintext []byte, counter uint64) []byte {
-	nonce := c.deriveNonce(counter)
-	return c.aead.Seal(nil, nonce, plaintext, aad)
-}
-
-func (c *Cipher) Open(aad, ciphertext []byte, counter uint64) ([]byte, error) {
-	nonce := c.deriveNonce(counter)
 	pt, err := c.aead.Open(nil, nonce, ciphertext, aad)
 	if err != nil {
 		return nil, ErrDecryptFailed
@@ -98,14 +74,39 @@ func (c *Cipher) Open(aad, ciphertext []byte, counter uint64) ([]byte, error) {
 	return pt, nil
 }
 
-func DeriveNonceFromParams(ssrc, timestamp uint32, sequence uint16) []byte {
+// SealWithBase is the send-side inverse of OpenWithBase: it seals plaintext under
+// the same explicit per-stream nonce (nonceBase ‖ counter, 12 bytes total),
+// authenticating aad. It is the sender counterpart used by clients (and the shared
+// test harness) so encrypt/decrypt stay in one place and cannot drift.
+func (c *Cipher) SealWithBase(aad, plaintext []byte, nonceBase [NonceBaseSize]byte, counter uint64) []byte {
 	nonce := make([]byte, NonceSize)
-	binary.BigEndian.PutUint32(nonce[0:4], ssrc)
-	binary.BigEndian.PutUint32(nonce[4:8], timestamp)
-	binary.BigEndian.PutUint16(nonce[8:10], sequence)
-	return nonce
+	copy(nonce[0:NonceBaseSize], nonceBase[:])
+	binary.BigEndian.PutUint64(nonce[NonceBaseSize:], counter)
+	return c.aead.Seal(nil, nonce, plaintext, aad)
 }
 
+// DeriveNonceBase computes a per-SSRC nonce base via HKDF-SHA256, matching the
+// client: info = "nonce-base\x00" || room_id || key_id || ssrc(BE). It is
+// distinct per SSRC, so two senders can never collide on a (nonce_base, counter)
+// pair — removing the shared-nonce-base GCM reuse risk.
+func DeriveNonceBase(key []byte, roomID string, keyID uint8, ssrc uint32) [NonceBaseSize]byte {
+	info := make([]byte, 0, len("nonce-base\x00")+len(roomID)+1+4)
+	info = append(info, []byte("nonce-base\x00")...)
+	info = append(info, []byte(roomID)...)
+	info = append(info, keyID)
+	var ss [4]byte
+	binary.BigEndian.PutUint32(ss[:], ssrc)
+	info = append(info, ss[:]...)
+
+	reader := hkdf.New(sha256.New, key, nil, info)
+	var out [NonceBaseSize]byte
+	_, _ = io.ReadFull(reader, out[:])
+	return out
+}
+
+// ReplayFilter is a sliding-window anti-replay filter over 64-bit packet
+// counters. The bitmap tracks which of the ReplayWindow positions below max have
+// already been seen. It is concurrency-safe via its own mutex.
 type ReplayFilter struct {
 	mu     sync.Mutex
 	max    uint64
@@ -113,10 +114,16 @@ type ReplayFilter struct {
 	inited bool
 }
 
+// NewReplayFilter returns an empty filter; the first Check seeds max with that
+// packet's counter.
 func NewReplayFilter() *ReplayFilter {
 	return &ReplayFilter{}
 }
 
+// Check records counter and reports whether it is fresh. It returns ErrReplay if
+// the counter was already seen or lies more than ReplayWindow behind the highest
+// counter; nil means accepted (and the position is now marked used). Safe for
+// concurrent callers.
 func (rf *ReplayFilter) Check(counter uint64) error {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -153,6 +160,9 @@ func (rf *ReplayFilter) Check(counter uint64) error {
 	return nil
 }
 
+// shiftWindow advances the window by shift positions when a newer counter
+// arrives, shifting the seen-bitmap toward older bits (and zero-filling the
+// freshly exposed high positions). Caller must hold rf.mu.
 func (rf *ReplayFilter) shiftWindow(shift uint64) {
 	if shift >= ReplayWindow {
 		for i := range rf.bitmap {
@@ -188,50 +198,52 @@ func (rf *ReplayFilter) shiftWindow(shift uint64) {
 	}
 }
 
+// SessionCrypto bundles a session's AEAD cipher, its replay filter, and the
+// material (key + roomID + KeyID) needed to re-derive per-SSRC nonce bases at
+// decrypt time. KeyID identifies this key on the wire so a rotating peer's
+// packets can be routed to the right cipher.
 type SessionCrypto struct {
 	Cipher       *Cipher
 	ReplayFilter *ReplayFilter
 	KeyID        uint8
-	Counter      uint64
-	mu           sync.Mutex
+	key          []byte
+	roomID       string
 }
 
-func NewSessionCrypto(key, nonceBase []byte, keyID uint8) (*SessionCrypto, error) {
-	cipher, err := NewCipher(key, nonceBase)
+// NewSessionCryptoDerived builds session crypto that derives the nonce base
+// per-SSRC (HKDF) at decrypt time, using the shared room key as the AES key.
+func NewSessionCryptoDerived(key []byte, roomID string, keyID uint8) (*SessionCrypto, error) {
+	c, err := NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
-
-	counter, err := RandomCounterStart()
-	if err != nil {
-		counter = 0
-	}
-
+	keyCopy := make([]byte, len(key))
+	copy(keyCopy, key)
 	return &SessionCrypto{
-		Cipher:       cipher,
+		Cipher:       c,
 		ReplayFilter: NewReplayFilter(),
 		KeyID:        keyID,
-		Counter:      counter,
+		key:          keyCopy,
+		roomID:       roomID,
 	}, nil
 }
 
-func (sc *SessionCrypto) NextCounter() uint64 {
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
-	c := sc.Counter
-	sc.Counter++
-	return c
-}
-
-func (sc *SessionCrypto) Encrypt(aad, plaintext []byte) ([]byte, uint64) {
-	counter := sc.NextCounter()
-	ciphertext := sc.Cipher.Seal(aad, plaintext, counter)
-	return ciphertext, counter
-}
-
-func (sc *SessionCrypto) Decrypt(aad, ciphertext []byte, counter uint64) ([]byte, error) {
+// DecryptSSRC opens a packet using the per-SSRC derived nonce base, with replay
+// protection — a replayed packet must not be accepted, since the migration
+// verify uses a successful decrypt to move a session's address binding.
+func (sc *SessionCrypto) DecryptSSRC(aad, ciphertext []byte, counter uint64, ssrc uint32) ([]byte, error) {
 	if err := sc.ReplayFilter.Check(counter); err != nil {
 		return nil, err
 	}
-	return sc.Cipher.Open(aad, ciphertext, counter)
+	base := DeriveNonceBase(sc.key, sc.roomID, sc.KeyID, ssrc)
+	return sc.Cipher.OpenWithBase(aad, ciphertext, base, counter)
+}
+
+// EncryptSSRC is the send-side mirror of DecryptSSRC: it seals plaintext under the
+// per-SSRC derived nonce base, so a client (or the shared test harness) produces
+// exactly what a peer's DecryptSSRC expects. There is no replay filter on the send
+// path — counters are assigned by the caller.
+func (sc *SessionCrypto) EncryptSSRC(aad, plaintext []byte, counter uint64, ssrc uint32) []byte {
+	base := DeriveNonceBase(sc.key, sc.roomID, sc.KeyID, ssrc)
+	return sc.Cipher.SealWithBase(aad, plaintext, base, counter)
 }

@@ -4,6 +4,9 @@ import (
 	"fmt"
 )
 
+// PrintAccessBanner writes a boxed, human-readable summary of the advertised
+// access addresses (public/LAN endpoints, detection source, and any notes) to
+// stdout at startup, so an operator can see how to reach the service.
 func PrintAccessBanner(a Advertised, serviceName string) {
 	fmt.Println("╔══════════════════════════════════════════════════════════════════════════╗")
 	fmt.Printf("║ %-72s ║\n", serviceName)
@@ -24,6 +27,8 @@ func PrintAccessBanner(a Advertised, serviceName string) {
 	fmt.Println("╚══════════════════════════════════════════════════════════════════════════╝")
 }
 
+// wrapText hard-wraps text into lines of at most width runes so long notes fit
+// inside the banner box. It splits purely by byte length (no word boundaries).
 func wrapText(text string, width int) []string {
 	if len(text) <= width {
 		return []string{text}

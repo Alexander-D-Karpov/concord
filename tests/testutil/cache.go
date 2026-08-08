@@ -8,6 +8,11 @@ import (
 	infraCache "github.com/Alexander-D-Karpov/concord/internal/infra/cache"
 )
 
+// Package-level singletons back a single Redis connection shared across the whole
+// test binary: cacheOnce and asideOnce ensure the cache and the cache-aside helper
+// are each built at most once per process, sharedCache and sharedAside hold those
+// instances, and cacheErr records a connection failure so every caller can degrade
+// consistently.
 var (
 	cacheOnce   sync.Once
 	asideOnce   sync.Once
@@ -16,6 +21,11 @@ var (
 	cacheErr    error
 )
 
+// GetCache returns the process-wide shared Redis cache, connecting once on the first
+// call using the REDIS_HOST/REDIS_PORT/REDIS_PASSWORD/REDIS_DB env vars (defaulting
+// to localhost:6379, db 0). When Redis is unreachable it logs and returns nil rather
+// than failing the test, so cache-optional tests can continue; use MustCache when the
+// cache is mandatory.
 func GetCache(t *testing.T) *infraCache.Cache {
 	t.Helper()
 
@@ -46,6 +56,8 @@ func GetCache(t *testing.T) *infraCache.Cache {
 	return sharedCache
 }
 
+// MustCache returns the shared cache like GetCache, but fails the test via t.Fatalf
+// when Redis is unavailable; use it in tests that cannot run without a cache.
 func MustCache(t *testing.T) *infraCache.Cache {
 	t.Helper()
 	c := GetCache(t)
@@ -55,6 +67,9 @@ func MustCache(t *testing.T) *infraCache.Cache {
 	return c
 }
 
+// GetAside returns the process-wide shared cache-aside helper, built once over the
+// shared cache on first call. It returns nil (and builds nothing) when the underlying
+// Redis cache is unavailable.
 func GetAside(t *testing.T) *infraCache.AsidePattern {
 	t.Helper()
 
@@ -67,6 +82,8 @@ func GetAside(t *testing.T) *infraCache.AsidePattern {
 	return sharedAside
 }
 
+// MustAside returns the shared AsidePattern like GetAside, but fails the test via
+// t.Fatalf when Redis (and therefore the aside helper) is unavailable.
 func MustAside(t *testing.T) *infraCache.AsidePattern {
 	t.Helper()
 	a := GetAside(t)
@@ -76,6 +93,10 @@ func MustAside(t *testing.T) *infraCache.AsidePattern {
 	return a
 }
 
+// CacheFlushAll flushes every key from the shared Redis instance so a test starts
+// from clean state. It is a no-op when the cache was never connected and logs (rather
+// than fails) on error. Because it wipes the entire selected database, point tests at
+// a dedicated REDIS_DB.
 func CacheFlushAll(t *testing.T) {
 	t.Helper()
 	if sharedCache != nil {
@@ -85,6 +106,10 @@ func CacheFlushAll(t *testing.T) {
 	}
 }
 
+// CacheTeardown closes the shared Redis connection and clears the cache singletons;
+// it is meant to run once (e.g. from TestMain) after all tests finish. It does not
+// reset the sync.Once guards, so no reconnection happens afterward within the same
+// process.
 func CacheTeardown() {
 	if sharedCache != nil {
 		_ = sharedCache.Close()

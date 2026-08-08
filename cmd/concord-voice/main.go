@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,17 +21,21 @@ import (
 	"github.com/Alexander-D-Karpov/concord/internal/common/config"
 	"github.com/Alexander-D-Karpov/concord/internal/common/logging"
 	"github.com/Alexander-D-Karpov/concord/internal/common/netinfo"
+	"github.com/Alexander-D-Karpov/concord/internal/voice/congestion"
 	"github.com/Alexander-D-Karpov/concord/internal/voice/control"
 	"github.com/Alexander-D-Karpov/concord/internal/voice/discovery"
 	"github.com/Alexander-D-Karpov/concord/internal/voice/health"
 	"github.com/Alexander-D-Karpov/concord/internal/voice/room"
 	"github.com/Alexander-D-Karpov/concord/internal/voice/router"
 	"github.com/Alexander-D-Karpov/concord/internal/voice/session"
+	"github.com/Alexander-D-Karpov/concord/internal/voice/tcp"
 	"github.com/Alexander-D-Karpov/concord/internal/voice/telemetry"
 	"github.com/Alexander-D-Karpov/concord/internal/voice/udp"
 	"github.com/google/uuid"
 )
 
+// main runs the voice media server, printing any fatal error to stderr and exiting
+// non-zero.
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -37,6 +43,16 @@ func main() {
 	}
 }
 
+// run is the composition root for concord-voice. It loads config/.env and logging,
+// derives (or generates) the server ID, and builds the session/room managers,
+// telemetry, congestion controller and packet router. It opens the UDP server pool
+// (multi-port, or single-port SO_REUSEPORT when configured), an optional TCP/TLS media
+// fallback, and the control server; computes advertised addresses and, when a registry
+// URL is set, registers and heartbeats CPU/egress stats to the main API. It starts the
+// UDP, control, metrics (9101) and health (8082) servers plus a periodic loop that
+// steps congestion tiers, sweeps inactive sessions and paints stats (sticky TTY status
+// bar or structured log line). It then blocks until a signal or server error and shuts
+// down by cancelling the context, stopping the router and registrar, and draining.
 func run() error {
 	_ = godotenv.Load(".env")
 
@@ -85,7 +101,8 @@ func run() error {
 	metrics := telemetry.NewMetrics(logger)
 	telemetryLogger := telemetry.NewLogger(logger)
 
-	voiceRouter := router.NewRouter(sessionManager, logger, metrics)
+	congestionCtrl := congestion.NewController(congestion.DefaultConfig())
+	voiceRouter := router.NewRouter(sessionManager, logger, metrics, congestionCtrl)
 
 	healthServer := health.NewServer(logger)
 	healthServer.RegisterCheck("sessions", func(ctx context.Context) error {
@@ -113,19 +130,41 @@ func run() error {
 		portCount = cfg.Voice.UDPPortEnd - cfg.Voice.UDPPortStart
 	}
 
+	singlePort := cfg.Voice.SinglePort
+	udpStartPort := cfg.Voice.UDPPortStart
+	if singlePort {
+		if cfg.Voice.PublicUDPPort > 0 {
+			udpStartPort = cfg.Voice.PublicUDPPort
+		}
+		udpPort = udpStartPort
+		portCount = cfg.Voice.SocketCount
+		if portCount <= 0 {
+			portCount = runtime.NumCPU()
+		}
+		logger.Info("single-port UDP mode (SO_REUSEPORT)",
+			zap.Int("port", udpStartPort),
+			zap.Int("sockets", portCount),
+		)
+	}
+
 	udpPool, err := udp.NewServerPool(
 		cfg.Voice.UDPHost,
-		cfg.Voice.UDPPortStart,
+		udpStartPort,
 		portCount,
+		singlePort,
 		sessionManager,
 		voiceRouter,
 		jwtManager,
 		logger,
 		metrics,
+		congestionCtrl,
 	)
 	if err != nil {
 		return fmt.Errorf("create UDP pool: %w", err)
 	}
+	// TCP-fallback media has no origin UDP socket; give the router a default
+	// egress socket so it can still forward to UDP peers.
+	voiceRouter.SetDefaultConn(udpPool.PrimaryConn())
 
 	// Create control server for registry communication
 	controlServer := control.NewServer(
@@ -174,6 +213,8 @@ func run() error {
 			udpAddress,
 			ctrlAddress,
 			1000,
+			cfg.Voice.RegisterSecret,
+			cfg.Voice.Secret,
 			logger,
 		)
 		if err != nil {
@@ -187,19 +228,14 @@ func run() error {
 				)
 			}
 
-			// Stats function for heartbeat
+			// Stats function for heartbeat: real CPU utilization + egress rate.
+			loadSampler := telemetry.NewLoadSampler()
 			statsFunc := func() (int32, int32, float64, float64) {
 				rooms := sessionManager.GetAllRooms()
 				sessions := sessionManager.GetAllSessions()
-
-				var m runtime.MemStats
-				runtime.ReadMemStats(&m)
-				cpu := float64(runtime.NumGoroutine()) / 100.0
-
 				stats := metrics.GetStats()
-				outboundMbps := float64(stats.BytesSent) / (1024 * 1024)
-
-				return int32(len(rooms)), int32(len(sessions)), cpu, outboundMbps
+				cpu, mbps := loadSampler.Sample(stats.BytesSent, time.Now())
+				return int32(len(rooms)), int32(len(sessions)), cpu, mbps
 			}
 
 			registrar.StartHeartbeat(ctx, 30*time.Second, statsFunc)
@@ -219,6 +255,24 @@ func run() error {
 			errChan <- fmt.Errorf("UDP pool: %w", err)
 		}
 	}()
+
+	// Optional TCP/TLS fallback for clients whose UDP is blocked
+	if cfg.Voice.TCPPort > 0 {
+		var tlsCfg *tls.Config
+		if cfg.Voice.TLSCert != "" && cfg.Voice.TLSKey != "" {
+			cert, certErr := tls.LoadX509KeyPair(cfg.Voice.TLSCert, cfg.Voice.TLSKey)
+			if certErr != nil {
+				return fmt.Errorf("load voice TLS keypair: %w", certErr)
+			}
+			tlsCfg = &tls.Config{Certificates: []tls.Certificate{cert}}
+		}
+		tcpSrv := tcp.NewServer(udpPool.Handler(), sessionManager, logger, tlsCfg)
+		go func() {
+			if err := tcpSrv.Start(ctx, cfg.Voice.TCPPort); err != nil {
+				errChan <- fmt.Errorf("tcp fallback: %w", err)
+			}
+		}()
+	}
 
 	// Start control server
 	go func() {
@@ -245,15 +299,27 @@ func run() error {
 	}()
 
 	go func() {
-		cleanupTicker := time.NewTicker(30 * time.Second)
+		cleanupTicker := time.NewTicker(10 * time.Second)
 		statsTicker := time.NewTicker(10 * time.Second)
+		tierTicker := time.NewTicker(time.Second)
 		defer cleanupTicker.Stop()
 		defer statsTicker.Stop()
+		defer tierTicker.Stop()
+
+		// A live bottom status bar refreshes faster than the scrolling log line.
+		if logging.StatusEnabled() {
+			statsTicker.Reset(2 * time.Second)
+		}
+
+		statsLoad := telemetry.NewLoadSampler()
 
 		for {
 			select {
+			case <-tierTicker.C:
+				congestionCtrl.StepTiers(time.Now())
 			case <-cleanupTicker.C:
-				removed := sessionManager.CleanupInactive(2 * time.Minute)
+				removed := udpPool.SweepInactive(20*time.Second, 90*time.Second)
+				congestionCtrl.Prune(time.Now())
 				if len(removed) > 0 {
 					logger.Info("cleaned up inactive sessions",
 						zap.Int("count", len(removed)),
@@ -265,23 +331,45 @@ func run() error {
 				}
 
 			case <-statsTicker.C:
+				now := time.Now()
 				sessions := sessionManager.GetAllSessions()
-				rooms := sessionManager.GetAllRooms() // Use session manager's room tracking
-
+				rooms := sessionManager.GetAllRooms() // session manager's room tracking
 				metrics.SetActiveSessions(int32(len(sessions)))
 				metrics.SetActiveRooms(int32(len(rooms)))
 
-				stats := metrics.GetStats()
-				if len(sessions) > 0 {
-					logger.Debug("server stats",
-						zap.Int("active_sessions", len(sessions)),
-						zap.Int("active_rooms", len(rooms)),
-						zap.Uint64("packets_received", stats.PacketsReceived),
-						zap.Uint64("packets_sent", stats.PacketsSent),
-						zap.Uint64("bytes_received", stats.BytesReceived),
-						zap.Uint64("bytes_sent", stats.BytesSent),
-						zap.Uint64("packets_dropped", stats.PacketsDropped),
-					)
+				snap := metrics.Snapshot(now, 3)
+				cpu, _ := statsLoad.Sample(snap.TotalBytesOut, now)
+
+				// Interactive TTY: paint a sticky bottom bar (logs scroll above).
+				if logging.StatusEnabled() {
+					bar := "voice │ " + snap.Summary(cpu, logging.StatusColor())
+					if snap.HasEvents() {
+						bar += " │ " + snap.Reliability()
+					}
+					if len(snap.TopRooms) > 0 {
+						bar += " │ " + formatTopRooms(snap.TopRooms)
+					}
+					logging.SetStatus(bar)
+					continue
+				}
+
+				// Non-interactive (piped/JSON/file): emit a structured line.
+				fields := []zap.Field{
+					zap.Float64("mbps_out", snap.MbpsOut),
+					zap.Float64("drop_ratio", snap.DropRatio),
+					zap.Float64("rtt_p95_ms", snap.RTTp95),
+				}
+				if snap.HasEvents() {
+					fields = append(fields, zap.String("reliability", snap.Reliability()))
+				}
+				if len(snap.TopRooms) > 0 {
+					fields = append(fields, zap.String("top_rooms", formatTopRooms(snap.TopRooms)))
+				}
+				msg := "voice │ " + snap.Summary(cpu, logging.ColorEnabled())
+				if len(sessions) > 0 || snap.PktsInPerSec > 0 || snap.PktsOutPerSec > 0 {
+					logger.Info(msg, fields...)
+				} else {
+					logger.Debug(msg, fields...)
 				}
 
 			case <-ctx.Done():
@@ -302,7 +390,8 @@ func run() error {
 		logger.Info("received shutdown signal", zap.String("signal", sig.String()))
 	}
 
-	// Graceful shutdown
+	// Graceful shutdown: drop the status bar so the shell prompt returns clean.
+	logging.ClearStatus()
 	logger.Info("shutting down gracefully...")
 
 	// Stop accepting new connections
@@ -321,4 +410,21 @@ func run() error {
 
 	logger.Info("shutdown complete")
 	return nil
+}
+
+// formatTopRooms renders the hottest rooms by routed volume for the stats line,
+// truncating room IDs so the line stays terminal-width friendly.
+func formatTopRooms(rooms []telemetry.RoomStat) string {
+	var b strings.Builder
+	for i, r := range rooms {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		id := r.Room
+		if len(id) > 8 {
+			id = id[:8]
+		}
+		fmt.Fprintf(&b, "%s=%.1fMB", id, float64(r.Bytes)/1e6)
+	}
+	return b.String()
 }

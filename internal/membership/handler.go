@@ -10,17 +10,23 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// Handler is the MembershipService gRPC server, a thin translation layer over
+// the membership Service.
 type Handler struct {
 	membershipv1.UnimplementedMembershipServiceServer
 	service *Service
 }
 
+// NewHandler constructs the MembershipService handler.
 func NewHandler(service *Service) *Handler {
 	return &Handler{
 		service: service,
 	}
 }
 
+// Invite handles the Invite RPC, creating a room invite for req.UserId; the
+// service enforces that the caller is a member and dedupes existing members and
+// pending invites.
 func (h *Handler) Invite(ctx context.Context, req *membershipv1.InviteRequest) (*membershipv1.RoomInvite, error) {
 	if req.RoomId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id is required"))
@@ -37,6 +43,8 @@ func (h *Handler) Invite(ctx context.Context, req *membershipv1.InviteRequest) (
 	return toProtoRoomInvite(invite), nil
 }
 
+// AcceptRoomInvite handles the AcceptRoomInvite RPC, returning the resulting
+// membership; invitee-only enforcement lives in the service.
 func (h *Handler) AcceptRoomInvite(ctx context.Context, req *membershipv1.AcceptRoomInviteRequest) (*commonv1.Member, error) {
 	if req.InviteId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("invite_id is required"))
@@ -50,6 +58,7 @@ func (h *Handler) AcceptRoomInvite(ctx context.Context, req *membershipv1.Accept
 	return toProtoMember(member), nil
 }
 
+// RejectRoomInvite handles the RejectRoomInvite RPC (invitee declines).
 func (h *Handler) RejectRoomInvite(ctx context.Context, req *membershipv1.RejectRoomInviteRequest) (*membershipv1.EmptyResponse, error) {
 	if req.InviteId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("invite_id is required"))
@@ -62,6 +71,7 @@ func (h *Handler) RejectRoomInvite(ctx context.Context, req *membershipv1.Reject
 	return &membershipv1.EmptyResponse{}, nil
 }
 
+// CancelRoomInvite handles the CancelRoomInvite RPC (inviter withdraws).
 func (h *Handler) CancelRoomInvite(ctx context.Context, req *membershipv1.CancelRoomInviteRequest) (*membershipv1.EmptyResponse, error) {
 	if req.InviteId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("invite_id is required"))
@@ -74,6 +84,8 @@ func (h *Handler) CancelRoomInvite(ctx context.Context, req *membershipv1.Cancel
 	return &membershipv1.EmptyResponse{}, nil
 }
 
+// ListRoomInvites handles the ListRoomInvites RPC, returning the caller's pending
+// incoming and outgoing invites.
 func (h *Handler) ListRoomInvites(ctx context.Context, req *membershipv1.ListRoomInvitesRequest) (*membershipv1.ListRoomInvitesResponse, error) {
 	incoming, outgoing, err := h.service.ListRoomInvites(ctx)
 	if err != nil {
@@ -96,6 +108,8 @@ func (h *Handler) ListRoomInvites(ctx context.Context, req *membershipv1.ListRoo
 	}, nil
 }
 
+// Remove handles the Remove RPC (kick a member); admin-only enforcement and key
+// rotation live in the service.
 func (h *Handler) Remove(ctx context.Context, req *membershipv1.RemoveRequest) (*membershipv1.EmptyResponse, error) {
 	if req.RoomId == "" || req.UserId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id and user_id are required"))
@@ -108,6 +122,9 @@ func (h *Handler) Remove(ctx context.Context, req *membershipv1.RemoveRequest) (
 	return &membershipv1.EmptyResponse{}, nil
 }
 
+// SetRole handles the SetRole RPC. It maps the proto role to its string form for
+// the service and echoes back a minimal Member with the requested role (not a
+// re-read of the stored record); admin-only enforcement lives in the service.
 func (h *Handler) SetRole(ctx context.Context, req *membershipv1.SetRoleRequest) (*commonv1.Member, error) {
 	if req.RoomId == "" || req.UserId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id and user_id are required"))
@@ -125,6 +142,8 @@ func (h *Handler) SetRole(ctx context.Context, req *membershipv1.SetRoleRequest)
 	}, nil
 }
 
+// SetNickname handles the SetNickname RPC, setting the caller's own nickname and
+// returning their refreshed membership record.
 func (h *Handler) SetNickname(ctx context.Context, req *membershipv1.SetNicknameRequest) (*commonv1.Member, error) {
 	if req.RoomId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id is required"))
@@ -142,6 +161,7 @@ func (h *Handler) SetNickname(ctx context.Context, req *membershipv1.SetNickname
 	return toProtoMember(member), nil
 }
 
+// ListMembers handles the ListMembers RPC, returning all members of a room.
 func (h *Handler) ListMembers(ctx context.Context, req *membershipv1.ListMembersRequest) (*membershipv1.ListMembersResponse, error) {
 	if req.RoomId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id is required"))
@@ -162,6 +182,8 @@ func (h *Handler) ListMembers(ctx context.Context, req *membershipv1.ListMembers
 	}, nil
 }
 
+// toProtoRoomInvite converts a denormalized invite to its wire form, mapping the
+// status string to the proto enum (defaulting to PENDING for unknown values).
 func toProtoRoomInvite(inv *RoomInviteWithUsers) *membershipv1.RoomInvite {
 	status := membershipv1.RoomInviteStatus_ROOM_INVITE_STATUS_PENDING
 	switch inv.Status {
@@ -189,6 +211,9 @@ func toProtoRoomInvite(inv *RoomInviteWithUsers) *membershipv1.RoomInvite {
 	}
 }
 
+// toProtoMember converts a rooms.Member to the wire commonv1.Member (nil-safe),
+// flattening the optional nickname pointer to a plain string and mapping the role
+// string to the proto enum.
 func toProtoMember(m *rooms.Member) *commonv1.Member {
 	if m == nil {
 		return nil
@@ -210,6 +235,8 @@ func toProtoMember(m *rooms.Member) *commonv1.Member {
 	}
 }
 
+// roleToString maps the proto role enum to its stored string form, defaulting to
+// "member" for unspecified/unknown roles.
 func roleToString(role commonv1.Role) string {
 	switch role {
 	case commonv1.Role_ROLE_ADMIN:
@@ -221,6 +248,8 @@ func roleToString(role commonv1.Role) string {
 	}
 }
 
+// stringToRole maps a stored role string to the proto role enum, defaulting to
+// ROLE_MEMBER for unknown values.
 func stringToRole(role string) commonv1.Role {
 	switch role {
 	case "admin":

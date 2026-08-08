@@ -5,6 +5,9 @@ import (
 	"time"
 )
 
+// VoiceSession is a lightweight, control-plane view of a participant's presence in
+// a room (identity, assigned voice ServerID, and mute/video/speaking flags),
+// distinct from the data-plane Session that carries media/crypto state.
 type VoiceSession struct {
 	UserID       string
 	RoomID       string
@@ -15,17 +18,22 @@ type VoiceSession struct {
 	JoinedAt     time.Time
 }
 
+// RoomManager tracks room membership as a room -> user -> VoiceSession map, guarded
+// by mu. It is the presence/roster registry, separate from the media Manager.
 type RoomManager struct {
 	mu       sync.RWMutex
 	sessions map[string]map[string]*VoiceSession
 }
 
+// NewRoomManager returns an empty RoomManager.
 func NewRoomManager() *RoomManager {
 	return &RoomManager{
 		sessions: make(map[string]map[string]*VoiceSession),
 	}
 }
 
+// AddSession adds (or overwrites) a user's presence in a room, creating the room
+// bucket if needed. VideoEnabled starts as !audioOnly; muted/speaking start false.
 func (m *RoomManager) AddSession(roomID, userID, serverID string, audioOnly bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -45,6 +53,8 @@ func (m *RoomManager) AddSession(roomID, userID, serverID string, audioOnly bool
 	}
 }
 
+// RemoveSession removes a user from a room and drops the room bucket once empty.
+// No-op if the room or user is absent.
 func (m *RoomManager) RemoveSession(roomID, userID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -57,6 +67,8 @@ func (m *RoomManager) RemoveSession(roomID, userID string) {
 	}
 }
 
+// GetRoomSessions returns a snapshot slice of the room's presences (empty, non-nil
+// slice for an unknown room), in unspecified order.
 func (m *RoomManager) GetRoomSessions(roomID string) []*VoiceSession {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -73,6 +85,8 @@ func (m *RoomManager) GetRoomSessions(roomID string) []*VoiceSession {
 	return sessions
 }
 
+// GetSession returns the user's presence in a room, or nil if not present. The
+// pointer aliases stored state; treat as read-only.
 func (m *RoomManager) GetSession(roomID, userID string) *VoiceSession {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -83,6 +97,8 @@ func (m *RoomManager) GetSession(roomID, userID string) *VoiceSession {
 	return nil
 }
 
+// UpdateMuted sets the user's muted flag, returning false if the user is not in the
+// room.
 func (m *RoomManager) UpdateMuted(roomID, userID string, muted bool) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -96,6 +112,8 @@ func (m *RoomManager) UpdateMuted(roomID, userID string, muted bool) bool {
 	return false
 }
 
+// UpdateVideoEnabled sets the user's video flag, returning false if the user is not
+// in the room.
 func (m *RoomManager) UpdateVideoEnabled(roomID, userID string, enabled bool) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -109,6 +127,8 @@ func (m *RoomManager) UpdateVideoEnabled(roomID, userID string, enabled bool) bo
 	return false
 }
 
+// UpdateSpeaking sets the user's speaking flag, returning false if the user is not
+// in the room.
 func (m *RoomManager) UpdateSpeaking(roomID, userID string, speaking bool) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -122,6 +142,7 @@ func (m *RoomManager) UpdateSpeaking(roomID, userID string, speaking bool) bool 
 	return false
 }
 
+// GetAllRooms returns the IDs of all non-empty rooms, in unspecified order.
 func (m *RoomManager) GetAllRooms() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -133,6 +154,7 @@ func (m *RoomManager) GetAllRooms() []string {
 	return rooms
 }
 
+// GetTotalParticipants returns the count of presences across all rooms.
 func (m *RoomManager) GetTotalParticipants() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -144,6 +166,7 @@ func (m *RoomManager) GetTotalParticipants() int {
 	return total
 }
 
+// IsUserInRoom reports whether userID currently has a presence in roomID.
 func (m *RoomManager) IsUserInRoom(roomID, userID string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

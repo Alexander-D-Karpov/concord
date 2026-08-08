@@ -21,6 +21,8 @@ build:
 	@go build -o bin/concord-api ./cmd/concord-api
 	@echo "Building concord-voice..."
 	@go build -o bin/concord-voice ./cmd/concord-voice
+	@echo "Building concord-cli..."
+	@go build -o bin/concord-cli ./cmd/concord-cli
 
 clean:
 	@rm -rf bin/ api/gen/
@@ -32,6 +34,8 @@ test-cleanup:
 	@echo "Resetting test database..."
 	@PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS concord_test;" 2>/dev/null || true
 	@PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c "CREATE DATABASE concord_test;" 2>/dev/null || true
+	@echo "Dropping per-process isolated test databases..."
+	@PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -tc "SELECT 'DROP DATABASE IF EXISTS \"' || datname || '\";' FROM pg_database WHERE datname LIKE 'concord\_test\_%'" 2>/dev/null | PGPASSWORD=postgres psql -h localhost -U postgres -d postgres 2>/dev/null || true
 
 test: test-cleanup
 	@go test -v -race ./...

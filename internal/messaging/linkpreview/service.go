@@ -4,15 +4,17 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/Alexander-D-Karpov/concord/internal/infra/cache"
-	"golang.org/x/net/html"
 )
 
+// LinkPreview is the extracted metadata for a URL; it is also the value cached
+// (as JSON) under the unfurl cache key.
 type LinkPreview struct {
 	URL         string `json:"url"`
 	Title       string `json:"title"`
@@ -22,25 +24,72 @@ type LinkPreview struct {
 	Favicon     string `json:"favicon"`
 }
 
+// Service fetches URLs and builds link previews, backed by an optional cache
+// (nil-safe) and an SSRF-hardened HTTP client.
 type Service struct {
 	cache  *cache.Cache
 	client *http.Client
 }
 
 const (
-	unfurlCacheTTL    = 1 * time.Hour
+	// unfurlCacheTTL is how long a preview is cached, keyed by raw URL.
+	unfurlCacheTTL = 1 * time.Hour
+	// unfurlMaxBodySize caps how many bytes of the response body are parsed,
+	// protecting against oversized pages.
 	unfurlMaxBodySize = 512 * 1024
-	unfurlTimeout     = 10 * time.Second
+	// unfurlTimeout bounds the whole fetch, including redirects.
+	unfurlTimeout = 10 * time.Second
+	// unfurlMaxRedirect is the maximum number of redirects followed before failing.
+	unfurlMaxRedirect = 5
 )
 
+// allowedPorts is the SSRF allow-list of destination ports ("" means the
+// scheme's default); connections to any other port are refused at dial time.
+var allowedPorts = map[string]bool{"": true, "80": true, "443": true, "8080": true}
+
+// NewService builds a Service whose HTTP client is hardened against SSRF: at dial
+// time it enforces allowedPorts, resolves the host, and rejects the connection if
+// any resolved IP is blocked (see isBlockedIP), and it limits redirects to
+// unfurlMaxRedirect while disallowing non-http(s) redirect schemes. cacheClient
+// may be nil to disable caching.
 func NewService(cacheClient *cache.Cache) *Service {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			if !allowedPorts[port] {
+				return nil, fmt.Errorf("port %s not allowed", port)
+			}
+			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+			for _, ip := range ips {
+				if isBlockedIP(ip.IP) {
+					return nil, fmt.Errorf("resolved address is not allowed")
+				}
+			}
+			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+		},
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Second,
+	}
+
 	return &Service{
 		cache: cacheClient,
 		client: &http.Client{
-			Timeout: unfurlTimeout,
+			Timeout:   unfurlTimeout,
+			Transport: transport,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 5 {
+				if len(via) >= unfurlMaxRedirect {
 					return fmt.Errorf("too many redirects")
+				}
+				if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+					return fmt.Errorf("disallowed redirect scheme")
 				}
 				return nil
 			},
@@ -48,10 +97,38 @@ func NewService(cacheClient *cache.Cache) *Service {
 	}
 }
 
-func (s *Service) cacheKey(rawURL string) string {
-	return "unfurl:" + rawURL
+// isBlockedIP reports whether ip must not be dialed for SSRF safety: it blocks
+// nil, loopback, link-local, multicast, unspecified and private ranges, the
+// 169.254.169.254 cloud metadata address, and IPv6 unique-local (fc00::/7)
+// addresses.
+func isBlockedIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() || ip.IsUnspecified() || ip.IsPrivate() {
+		return true
+	}
+	if ip.Equal(net.ParseIP("169.254.169.254")) {
+		return true
+	}
+	if v6 := ip.To16(); v6 != nil && ip.To4() == nil && (v6[0]&0xfe) == 0xfc {
+		return true
+	}
+	return false
 }
 
+// cacheKey returns the cache key for a preview, namespacing the raw URL under
+// "unfurl:".
+func (s *Service) cacheKey(rawURL string) string { return "unfurl:" + rawURL }
+
+// Unfurl returns a link preview for rawURL. It rejects non-http(s) URLs, serves a
+// cached result when present, and otherwise fetches the page with a bot
+// User-Agent. Non-HTML responses (or HTTP errors) short-circuit: a >=400 status
+// is an error, while a non-text/html body yields a bare preview holding only the
+// URL. On success it parses OpenGraph/meta tags, defaults a missing favicon to
+// /favicon.ico on the host, and caches the result for unfurlCacheTTL. Note: the
+// SSRF checks live in the HTTP client's dialer (see NewService), not here.
 func (s *Service) Unfurl(ctx context.Context, rawURL string) (*LinkPreview, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
@@ -76,9 +153,7 @@ func (s *Service) Unfurl(ctx context.Context, rawURL string) (*LinkPreview, erro
 	if err != nil {
 		return nil, fmt.Errorf("fetch failed: %w", err)
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
@@ -104,90 +179,4 @@ func (s *Service) Unfurl(ctx context.Context, rawURL string) (*LinkPreview, erro
 	}
 
 	return preview, nil
-}
-
-func parseOGTags(r io.Reader, sourceURL string) (*LinkPreview, error) {
-	doc, err := html.Parse(r)
-	if err != nil {
-		return nil, fmt.Errorf("parse html: %w", err)
-	}
-
-	preview := &LinkPreview{URL: sourceURL}
-	var titleFromTag string
-
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode {
-			switch n.Data {
-			case "meta":
-				handleMeta(n, preview)
-			case "title":
-				if n.FirstChild != nil && n.FirstChild.Type == html.TextNode {
-					titleFromTag = n.FirstChild.Data
-				}
-			case "link":
-				handleLink(n, preview, sourceURL)
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
-	}
-	walk(doc)
-
-	if preview.Title == "" {
-		preview.Title = titleFromTag
-	}
-
-	return preview, nil
-}
-
-func handleMeta(n *html.Node, p *LinkPreview) {
-	var property, name, content string
-	for _, a := range n.Attr {
-		switch a.Key {
-		case "property":
-			property = a.Val
-		case "name":
-			name = a.Val
-		case "content":
-			content = a.Val
-		}
-	}
-
-	switch property {
-	case "og:title":
-		p.Title = content
-	case "og:description":
-		p.Description = content
-	case "og:image":
-		p.Image = content
-	case "og:site_name":
-		p.SiteName = content
-	}
-
-	if name == "description" && p.Description == "" {
-		p.Description = content
-	}
-}
-
-func handleLink(n *html.Node, p *LinkPreview, sourceURL string) {
-	var rel, href string
-	for _, a := range n.Attr {
-		switch a.Key {
-		case "rel":
-			rel = a.Val
-		case "href":
-			href = a.Val
-		}
-	}
-
-	if strings.Contains(rel, "icon") && href != "" {
-		if strings.HasPrefix(href, "/") {
-			if parsed, err := url.Parse(sourceURL); err == nil {
-				href = parsed.Scheme + "://" + parsed.Host + href
-			}
-		}
-		p.Favicon = href
-	}
 }

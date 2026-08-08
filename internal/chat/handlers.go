@@ -8,13 +8,16 @@ import (
 	commonv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/common/v1"
 	"github.com/Alexander-D-Karpov/concord/internal/auth/interceptor"
 	"github.com/Alexander-D-Karpov/concord/internal/common/errors"
-	"github.com/Alexander-D-Karpov/concord/internal/readtracking"
+	"github.com/Alexander-D-Karpov/concord/internal/messaging/readtracking"
+	"github.com/Alexander-D-Karpov/concord/internal/messaging/typing"
 	"github.com/Alexander-D-Karpov/concord/internal/storage"
-	"github.com/Alexander-D-Karpov/concord/internal/typing"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// Handler is the ChatService gRPC server. It validates and unmarshals requests,
+// stores attachment bytes through storage, and delegates domain logic to
+// service; read tracking and typing are handled by their own services.
 type Handler struct {
 	chatv1.UnimplementedChatServiceServer
 	service         *Service
@@ -23,6 +26,8 @@ type Handler struct {
 	typingSvc       *typing.Service
 }
 
+// NewHandler constructs the ChatService handler with all its collaborators
+// supplied up front (unlike the dm handler, which injects some via setters).
 func NewHandler(service *Service, storage *storage.Storage, readTrackingSvc *readtracking.Service, typingSvc *typing.Service) *Handler {
 	return &Handler{
 		service:         service,
@@ -32,6 +37,11 @@ func NewHandler(service *Service, storage *storage.Storage, readTrackingSvc *rea
 	}
 }
 
+// SendMessage handles the SendMessage RPC: it requires room_id plus content or
+// attachments, parses the optional reply/mention/forward fields, uploads each
+// non-empty attachment through storage (using the stored dimensions when the
+// backend detected them), and forwards a SendMessageParams to the service.
+// reply_mention_author defaults to true unless the request overrides it.
 func (h *Handler) SendMessage(ctx context.Context, req *chatv1.SendMessageRequest) (*chatv1.SendMessageResponse, error) {
 	if req.RoomId == "" || (req.Content == "" && len(req.Attachments) == 0) {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id and content or attachments are required"))
@@ -84,7 +94,53 @@ func (h *Handler) SendMessage(ctx context.Context, req *chatv1.SendMessageReques
 		})
 	}
 
-	msg, err := h.service.SendMessage(ctx, req.RoomId, req.Content, replyToID, mentionIDs, attachments)
+	params := SendMessageParams{
+		RoomID:             req.RoomId,
+		Content:            req.Content,
+		ReplyToID:          replyToID,
+		MentionIDs:         mentionIDs,
+		Attachments:        attachments,
+		ReplyMentionAuthor: true,
+	}
+
+	if req.MediaGroupId != "" {
+		params.MediaGroupID = &req.MediaGroupId
+	}
+
+	if req.ReplyQuotedContent != "" {
+		params.ReplyQuotedContent = &req.ReplyQuotedContent
+	}
+
+	if req.ForwardInfo != nil {
+		if req.ForwardInfo.OriginalAuthorId != "" {
+			if uid, err := uuid.Parse(req.ForwardInfo.OriginalAuthorId); err == nil {
+				params.ForwardFromUserID = &uid
+			}
+		}
+		if req.ForwardInfo.OriginalAuthorName != "" {
+			params.ForwardFromUserName = &req.ForwardInfo.OriginalAuthorName
+		}
+		if req.ForwardInfo.OriginalRoomId != "" {
+			if rid, err := uuid.Parse(req.ForwardInfo.OriginalRoomId); err == nil {
+				params.ForwardFromRoomID = &rid
+			}
+		}
+		if req.ForwardInfo.OriginalMessageId != "" {
+			if mid, err := strconv.ParseInt(req.ForwardInfo.OriginalMessageId, 10, 64); err == nil {
+				params.ForwardFromMsgID = &mid
+			}
+		}
+		if req.ForwardInfo.OriginalTimestamp != nil {
+			ts := req.ForwardInfo.OriginalTimestamp.AsTime()
+			params.ForwardOriginalTS = &ts
+		}
+	}
+
+	if req.ReplyMentionAuthor != nil {
+		params.ReplyMentionAuthor = *req.ReplyMentionAuthor
+	}
+
+	msg, err := h.service.SendMessage(ctx, params)
 	if err != nil {
 		return nil, errors.ToGRPCError(err)
 	}
@@ -94,6 +150,8 @@ func (h *Handler) SendMessage(ctx context.Context, req *chatv1.SendMessageReques
 	}, nil
 }
 
+// ListMessagesSince returns messages newer than after_message_id (forward
+// paging for catch-up/sync). limit is clamped to (0,200] and defaults to 100.
 func (h *Handler) ListMessagesSince(ctx context.Context, req *chatv1.ListMessagesSinceRequest) (*chatv1.ListMessagesSinceResponse, error) {
 	if req.RoomId == "" || req.AfterMessageId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id and after_message_id are required"))
@@ -125,6 +183,8 @@ func (h *Handler) ListMessagesSince(ctx context.Context, req *chatv1.ListMessage
 	}, nil
 }
 
+// EditMessage handles the EditMessage RPC, requiring room_id, message_id, and
+// non-empty content; author-only enforcement lives in the service.
 func (h *Handler) EditMessage(ctx context.Context, req *chatv1.EditMessageRequest) (*chatv1.EditMessageResponse, error) {
 	if req.RoomId == "" || req.MessageId == "" || req.Content == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id, message_id and content are required"))
@@ -145,6 +205,8 @@ func (h *Handler) EditMessage(ctx context.Context, req *chatv1.EditMessageReques
 	}, nil
 }
 
+// DeleteMessage handles the DeleteMessage RPC (soft delete); the service
+// enforces that only the author may delete.
 func (h *Handler) DeleteMessage(ctx context.Context, req *chatv1.DeleteMessageRequest) (*chatv1.EmptyResponse, error) {
 	if req.RoomId == "" || req.MessageId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id and message_id are required"))
@@ -162,6 +224,9 @@ func (h *Handler) DeleteMessage(ctx context.Context, req *chatv1.DeleteMessageRe
 	return &chatv1.EmptyResponse{}, nil
 }
 
+// ListMessages returns a page of a room's messages with before/after cursors and
+// also enriches the response with the caller's last-read message id when a read-
+// tracking service is available (a read-tracking failure is ignored, not fatal).
 func (h *Handler) ListMessages(ctx context.Context, req *chatv1.ListMessagesRequest) (*chatv1.ListMessagesResponse, error) {
 	if req.RoomId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id is required"))
@@ -215,6 +280,7 @@ func (h *Handler) ListMessages(ctx context.Context, req *chatv1.ListMessagesRequ
 	}, nil
 }
 
+// GetMessage handles the GetMessage RPC for a single message by id within a room.
 func (h *Handler) GetMessage(ctx context.Context, req *chatv1.GetMessageRequest) (*chatv1.GetMessageResponse, error) {
 	if req.RoomId == "" || req.MessageId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id and message_id are required"))
@@ -235,6 +301,8 @@ func (h *Handler) GetMessage(ctx context.Context, req *chatv1.GetMessageRequest)
 	}, nil
 }
 
+// AddReaction handles the AddReaction RPC, requiring room_id, message_id, and a
+// non-empty emoji, and returns the created reaction.
 func (h *Handler) AddReaction(ctx context.Context, req *chatv1.AddReactionRequest) (*chatv1.AddReactionResponse, error) {
 	if req.RoomId == "" || req.MessageId == "" || req.Emoji == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id, message_id and emoji are required"))
@@ -261,6 +329,8 @@ func (h *Handler) AddReaction(ctx context.Context, req *chatv1.AddReactionReques
 	}, nil
 }
 
+// RemoveReaction handles the RemoveReaction RPC, removing the caller's emoji
+// reaction from a message.
 func (h *Handler) RemoveReaction(ctx context.Context, req *chatv1.RemoveReactionRequest) (*chatv1.EmptyResponse, error) {
 	if req.RoomId == "" || req.MessageId == "" || req.Emoji == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id, message_id and emoji are required"))
@@ -278,6 +348,8 @@ func (h *Handler) RemoveReaction(ctx context.Context, req *chatv1.RemoveReaction
 	return &chatv1.EmptyResponse{}, nil
 }
 
+// PinMessage handles the PinMessage RPC; the service records the caller as the
+// pinner and broadcasts the pin.
 func (h *Handler) PinMessage(ctx context.Context, req *chatv1.PinMessageRequest) (*chatv1.EmptyResponse, error) {
 	if req.RoomId == "" || req.MessageId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id and message_id are required"))
@@ -295,6 +367,7 @@ func (h *Handler) PinMessage(ctx context.Context, req *chatv1.PinMessageRequest)
 	return &chatv1.EmptyResponse{}, nil
 }
 
+// UnpinMessage handles the UnpinMessage RPC, removing a room's pin for a message.
 func (h *Handler) UnpinMessage(ctx context.Context, req *chatv1.UnpinMessageRequest) (*chatv1.EmptyResponse, error) {
 	if req.RoomId == "" || req.MessageId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id and message_id are required"))
@@ -312,6 +385,7 @@ func (h *Handler) UnpinMessage(ctx context.Context, req *chatv1.UnpinMessageRequ
 	return &chatv1.EmptyResponse{}, nil
 }
 
+// ListPinnedMessages handles the ListPinnedMessages RPC for a room.
 func (h *Handler) ListPinnedMessages(ctx context.Context, req *chatv1.ListPinnedMessagesRequest) (*chatv1.ListPinnedMessagesResponse, error) {
 	if req.RoomId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id is required"))
@@ -332,6 +406,9 @@ func (h *Handler) ListPinnedMessages(ctx context.Context, req *chatv1.ListPinned
 	}, nil
 }
 
+// GetThread returns a parent message and a page of its replies. limit is clamped
+// to (0,100] (default 50); the before cursor is passed through as the reply
+// offset the service expects.
 func (h *Handler) GetThread(ctx context.Context, req *chatv1.GetThreadRequest) (*chatv1.GetThreadResponse, error) {
 	if req.RoomId == "" || req.MessageId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id and message_id are required"))
@@ -372,6 +449,8 @@ func (h *Handler) GetThread(ctx context.Context, req *chatv1.GetThreadRequest) (
 	}, nil
 }
 
+// SearchMessages handles the SearchMessages RPC, requiring room_id and query;
+// limit is clamped to (0,100] and defaults to 50.
 func (h *Handler) SearchMessages(ctx context.Context, req *chatv1.SearchMessagesRequest) (*chatv1.SearchMessagesResponse, error) {
 	if req.RoomId == "" || req.Query == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id and query are required"))
@@ -406,6 +485,8 @@ func (h *Handler) SearchMessages(ctx context.Context, req *chatv1.SearchMessages
 	}, nil
 }
 
+// MarkAsRead advances the caller's last-read pointer in a room to message_id via
+// the read-tracking service, returning the new last-read id and unread count.
 func (h *Handler) MarkAsRead(ctx context.Context, req *chatv1.MarkAsReadRequest) (*chatv1.MarkAsReadResponse, error) {
 	if req.RoomId == "" || req.MessageId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id and message_id are required"))
@@ -442,6 +523,8 @@ func (h *Handler) MarkAsRead(ctx context.Context, req *chatv1.MarkAsReadRequest)
 	}, nil
 }
 
+// GetUnreadCounts returns the caller's per-room unread counts and total, sourced
+// from the read-tracking service.
 func (h *Handler) GetUnreadCounts(ctx context.Context, req *chatv1.GetUnreadCountsRequest) (*chatv1.GetUnreadCountsResponse, error) {
 	userID := interceptor.GetUserID(ctx)
 	if userID == "" {
@@ -475,6 +558,8 @@ func (h *Handler) GetUnreadCounts(ctx context.Context, req *chatv1.GetUnreadCoun
 	}, nil
 }
 
+// StartTyping records that the caller began typing in a room via the typing
+// service, which fans out the transient typing indicator to other members.
 func (h *Handler) StartTyping(ctx context.Context, req *chatv1.StartTypingRequest) (*chatv1.EmptyResponse, error) {
 	if req.RoomId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id is required"))
@@ -502,6 +587,8 @@ func (h *Handler) StartTyping(ctx context.Context, req *chatv1.StartTypingReques
 	return &chatv1.EmptyResponse{}, nil
 }
 
+// StopTyping clears the caller's typing indicator in a room via the typing
+// service.
 func (h *Handler) StopTyping(ctx context.Context, req *chatv1.StopTypingRequest) (*chatv1.EmptyResponse, error) {
 	if req.RoomId == "" {
 		return nil, errors.ToGRPCError(errors.BadRequest("room_id is required"))
@@ -529,6 +616,10 @@ func (h *Handler) StopTyping(ctx context.Context, req *chatv1.StopTypingRequest)
 	return &chatv1.EmptyResponse{}, nil
 }
 
+// toProtoMessage converts a domain Message to the wire commonv1.Message,
+// returning nil for a nil input. It stringifies the int64 Snowflake id, maps
+// DeletedAt to the Deleted flag, and copies attachments, mentions, reactions,
+// and forward metadata; reply_mention_author is always emitted (as a pointer).
 func toProtoMessage(msg *Message) *commonv1.Message {
 	if msg == nil {
 		return nil
@@ -583,5 +674,67 @@ func toProtoMessage(msg *Message) *commonv1.Message {
 		})
 	}
 
+	if msg.ForwardFromUserID != nil || msg.ForwardFromUserName != nil || msg.ForwardFromRoomID != nil || msg.ForwardFromMsgID != nil || msg.ForwardOriginalTS != nil {
+		protoMsg.ForwardInfo = &commonv1.ForwardInfo{}
+
+		if msg.ForwardFromUserID != nil {
+			protoMsg.ForwardInfo.OriginalAuthorId = msg.ForwardFromUserID.String()
+		}
+		if msg.ForwardFromUserName != nil {
+			protoMsg.ForwardInfo.OriginalAuthorName = *msg.ForwardFromUserName
+		}
+		if msg.ForwardFromRoomID != nil {
+			protoMsg.ForwardInfo.OriginalRoomId = msg.ForwardFromRoomID.String()
+		}
+		if msg.ForwardFromMsgID != nil {
+			protoMsg.ForwardInfo.OriginalMessageId = strconv.FormatInt(*msg.ForwardFromMsgID, 10)
+		}
+		if msg.ForwardOriginalTS != nil {
+			protoMsg.ForwardInfo.OriginalTimestamp = timestamppb.New(*msg.ForwardOriginalTS)
+		}
+	}
+
+	if msg.MediaGroupID != nil {
+		protoMsg.MediaGroupId = *msg.MediaGroupID
+	}
+
+	if msg.ReplyQuotedContent != nil {
+		protoMsg.ReplyQuotedContent = *msg.ReplyQuotedContent
+	}
+
+	replyMentionAuthor := msg.ReplyMentionAuthor
+	protoMsg.ReplyMentionAuthor = &replyMentionAuthor
+
+	protoMsg.EditCount = msg.EditCount
+
 	return protoMsg
+}
+
+// GetMessageEditHistory returns the recorded prior versions of a message,
+// each entry carrying the previous content, edit timestamp, and version number.
+func (h *Handler) GetMessageEditHistory(ctx context.Context, req *chatv1.GetMessageEditHistoryRequest) (*chatv1.GetMessageEditHistoryResponse, error) {
+	if req.RoomId == "" || req.MessageId == "" {
+		return nil, errors.ToGRPCError(errors.BadRequest("room_id and message_id are required"))
+	}
+
+	messageID, err := strconv.ParseInt(req.MessageId, 10, 64)
+	if err != nil {
+		return nil, errors.ToGRPCError(errors.BadRequest("invalid message_id"))
+	}
+
+	entries, err := h.service.GetEditHistory(ctx, req.RoomId, messageID)
+	if err != nil {
+		return nil, errors.ToGRPCError(err)
+	}
+
+	out := make([]*commonv1.EditHistoryEntry, len(entries))
+	for i, e := range entries {
+		out[i] = &commonv1.EditHistoryEntry{
+			Id:              e.ID,
+			PreviousContent: e.PreviousContent,
+			EditedAt:        timestamppb.New(e.EditedAt),
+			Version:         int32(e.Version),
+		}
+	}
+	return &chatv1.GetMessageEditHistoryResponse{Entries: out}, nil
 }

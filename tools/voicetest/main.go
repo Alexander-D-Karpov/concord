@@ -2,21 +2,13 @@ package main
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -25,30 +17,35 @@ import (
 	membershipv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/membership/v1"
 	roomsv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/rooms/v1"
 	usersv1 "github.com/Alexander-D-Karpov/concord/api/gen/go/users/v1"
-	"golang.org/x/crypto/hkdf"
+	"github.com/Alexander-D-Karpov/concord/internal/voice/crypto"
+	"github.com/Alexander-D-Karpov/concord/internal/voice/protocol"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/joho/godotenv"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
-const (
-	mediaHeaderSize = 24
-	nonceSize       = 12
-	nonceBaseSize   = 4
+// Load the repo .env before the flag vars below are initialized, so env-based
+// defaults (notably RATE_LIMIT_BYPASS_TOKEN, needed to get past the auth limiter
+// when registering many bots) are populated. Declared first so it runs first; a
+// missing .env is fine (Load errors are ignored). Run the tool from the repo root.
+var _ = godotenv.Load(".env")
 
-	pktHello   = 0x01
-	pktWelcome = 0x02
-	pktAudio   = 0x03
-	pktVideo   = 0x04
-	pktPing    = 0x05
-	pktPong    = 0x06
-	pktBye     = 0x07
+// The bot client, its media loops, and the aggregate stats live in client.go and
+// stats.go; the synthetic media, renderers, and TUI in signal.go / render.go /
+// mediatap.go / tui.go. This file is just flags, run-mode selection, and orchestration.
+// Packet types, codecs, header sizes and crypto primitives come from the backend's
+// internal/voice/{protocol,crypto} packages so this harness speaks the exact
+// production wire format — no duplicated constants that can silently drift.
 
-	codecOpus = 1
-	codecH264 = 2
-)
-
+// Command-line flags for the harness: gRPC endpoint/TLS and auth, load shape
+// (client count, duration, audio/video rates, video toggle), network impairment
+// (loss/jitter/reorder), churn/netchange intervals, advertised capabilities
+// (FEC/DTX/max-bitrate/report-loss), and run mode (fast-join, CI, TUI, render-dump).
+// Several defaults come from env vars via envOr.
 var (
 	grpcAddr             = flag.String("grpc", envOr("GRPC_API_URL", "localhost:9090"), "gRPC API address")
 	useTLS               = flag.Bool("tls", envOr("USE_TLS", "false") == "true", "TLS for gRPC")
@@ -61,8 +58,23 @@ var (
 	audioRateMs          = flag.Int("audio-rate", 20, "audio interval ms")
 	videoRateMs          = flag.Int("video-rate", 33, "video interval ms")
 	rateLimitBypassToken = flag.String("rl-bypass-token", envOr("RATE_LIMIT_BYPASS_TOKEN", ""), "rate limit bypass token")
+	lossRate             = flag.Float64("loss", 0, "outgoing packet loss probability (0..1)")
+	jitterMaxMs          = flag.Int("jitter", 0, "max added jitter ms on outgoing packets")
+	reorderRate          = flag.Float64("reorder", 0, "outgoing packet reorder probability (0..1)")
+	churnEvery           = flag.Duration("churn", 0, "if >0, bots leave+rejoin (bye/hello) at this interval")
+	netChangeEvery       = flag.Duration("netchange", 0, "if >0, bots rebind their UDP socket at this interval (exercises migration)")
+	strictCI             = flag.Bool("ci", false, "strict assertions + non-zero exit on failure")
+	fec                  = flag.Bool("fec", false, "advertise FEC capability in Hello")
+	dtx                  = flag.Bool("dtx", false, "advertise DTX capability in Hello")
+	maxBitrate           = flag.Int("max-bitrate", 2_000_000, "advertised max_bitrate (bps)")
+	reportLoss           = flag.Float64("report-loss", 0, "loss fraction to report in RR (drives server BitrateHint)")
+	fastJoin             = flag.Bool("fast-join", true, "skip room invites and join voice directly (requires server VOICE_DEBUG=true)")
+	tuiMode              = flag.String("tui", "auto", "live TUI: auto|on|off (auto = on when stdout is a TTY and not -ci)")
+	renderDump           = flag.String("render-dump", "", "headless: periodically write the monitor's rendered media panel to this file")
 )
 
+// envOr returns environment variable key, or def when it is unset or empty. Used to
+// seed flag defaults from the environment.
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -70,79 +82,80 @@ func envOr(key, def string) string {
 	return def
 }
 
-type stats struct {
-	audioSent  atomic.Uint64
-	videoSent  atomic.Uint64
-	audioRecv  atomic.Uint64
-	videoRecv  atomic.Uint64
-	pongRecv   atomic.Uint64
-	welcomeOK  atomic.Uint64
-	errors     atomic.Uint64
-	bytesOut   atomic.Uint64
-	bytesIn    atomic.Uint64
-	rttSamples []time.Duration
-	rttMu      sync.Mutex
+// wantTUI decides whether to run the interactive dashboard. "auto" enables it only
+// when stdout is a real terminal and we're not in CI mode (which is headless).
+func wantTUI() bool {
+	switch *tuiMode {
+	case "on":
+		return !*strictCI
+	case "off":
+		return false
+	default:
+		return !*strictCI && isTTY(os.Stdout)
+	}
 }
 
-func (s *stats) addRTT(d time.Duration) {
-	s.rttMu.Lock()
-	s.rttSamples = append(s.rttSamples, d)
-	s.rttMu.Unlock()
+// isTTY reports whether f is a character device (an interactive terminal) rather than
+// a pipe or regular file.
+func isTTY(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
-func (s *stats) summary() string {
-	s.rttMu.Lock()
-	defer s.rttMu.Unlock()
-	var avg, mn, mx time.Duration
-	if n := len(s.rttSamples); n > 0 {
-		mn = s.rttSamples[0]
-		for _, r := range s.rttSamples {
-			avg += r
-			if r < mn {
-				mn = r
-			}
-			if r > mx {
-				mx = r
-			}
+// monTap returns the monitor bot's media tap, or nil if there is no monitor, letting
+// callers pass an absent monitor through safely.
+func monTap(b *bot) *mediaTap {
+	if b == nil {
+		return nil
+	}
+	return b.tap
+}
+
+// statsLogLoop prints the aggregate summary every 5s (plain-log / headless mode).
+func statsLogLoop(ctx context.Context, st *stats) {
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-tick.C:
+			log.Printf("[STATS] %s", st.summary())
+		case <-ctx.Done():
+			return
 		}
-		avg /= time.Duration(n)
 	}
-	return fmt.Sprintf(
-		"audio_tx=%d video_tx=%d audio_rx=%d video_rx=%d pongs=%d welcomes=%d errs=%d out=%dKB in=%dKB rtt(avg=%v min=%v max=%v n=%d)",
-		s.audioSent.Load(), s.videoSent.Load(),
-		s.audioRecv.Load(), s.videoRecv.Load(),
-		s.pongRecv.Load(), s.welcomeOK.Load(), s.errors.Load(),
-		s.bytesOut.Load()/1024, s.bytesIn.Load()/1024,
-		avg, mn, mx, len(s.rttSamples),
-	)
 }
 
-type bot struct {
-	idx         int
-	handle      string
-	userID      string
-	token       string
-	roomID      string
-	voiceToken  string
-	udpHost     string
-	udpPort     int
-	ssrc        uint32
-	videoSSRC   uint32
-	screenSSRC  uint32
-	keyMaterial []byte
-	keyID       byte
-	conn        *net.UDPConn
-	st          *stats
-	ready       chan struct{}
-}
-
-func withRateLimitBypass(ctx context.Context) context.Context {
-	if *rateLimitBypassToken == "" {
-		return ctx
+// renderDumpLoop periodically writes the monitor's rendered media panel to a file so
+// the end-to-end media path can be inspected without an interactive terminal.
+func renderDumpLoop(ctx context.Context, path string, tap *mediaTap, cfg tuiConfig) {
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-tick.C:
+			if err := dumpRender(path, tap.snapshot(), cfg); err != nil {
+				log.Printf("render-dump: %v", err)
+			}
+		case <-ctx.Done():
+			_ = dumpRender(path, tap.snapshot(), cfg)
+			return
+		}
 	}
-	return metadata.AppendToOutgoingContext(ctx, "x-concord-ratelimit-bypass", *rateLimitBypassToken)
 }
 
+// main is the harness orchestrator. It parses flags, dials the gRPC API, and for each
+// simulated client authenticates and fetches its user ID. It creates (or reuses) the
+// stress room, then either fast-joins voice directly (requires server VOICE_DEBUG) or
+// runs the real invite/accept membership flow, and calls JoinVoice to obtain each bot's
+// voice token, UDP endpoint and room key. It selects a run mode (interactive TUI,
+// headless render-dump, or plain-log), optionally designates a publisher/monitor media
+// demo, dials each bot's UDP socket and launches its recv/audio/video/ping/churn/
+// netchange/RR goroutines. After the test duration it sends Byes, leaves voice, prints
+// the final stats, and in -ci mode asserts end-to-end health, exiting non-zero on
+// failure (or on any transport error).
 func main() {
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
@@ -234,22 +247,29 @@ func main() {
 	}
 	log.Printf("[SETUP] room_id=%s", bots[0].roomID)
 
-	for i := 1; i < *numClients; i++ {
-		log.Printf("[SETUP] inviting bot %d (%s) to room", i, bots[i].userID)
-		_, err := memberC.Invite(ownerCtx, &membershipv1.InviteRequest{
-			RoomId: bots[0].roomID,
-			UserId: bots[i].userID,
-		})
-		if err != nil {
-			log.Printf("[SETUP] invite bot %d failed (may already be member): %v", i, err)
-		} else {
-			botCtx := withAuth(rpcBaseCtx, bots[i].token)
-			invites, err := memberC.ListRoomInvites(botCtx, &membershipv1.ListRoomInvitesRequest{})
-			if err == nil {
-				for _, inv := range invites.Incoming {
-					if inv.RoomId == bots[0].roomID {
-						_, _ = memberC.AcceptRoomInvite(botCtx, &membershipv1.AcceptRoomInviteRequest{InviteId: inv.Id})
-						break
+	// fast-join relies on the server's VOICE_DEBUG gate to skip the membership check,
+	// so bots can JoinVoice directly without the invite/accept round-trips. Without a
+	// debug server, run with -fast-join=false to exercise the real membership path.
+	if *fastJoin {
+		log.Printf("[SETUP] fast-join: skipping invites, bots join voice directly (needs server VOICE_DEBUG=true)")
+	} else {
+		for i := 1; i < *numClients; i++ {
+			log.Printf("[SETUP] inviting bot %d (%s) to room", i, bots[i].userID)
+			_, err := memberC.Invite(ownerCtx, &membershipv1.InviteRequest{
+				RoomId: bots[0].roomID,
+				UserId: bots[i].userID,
+			})
+			if err != nil {
+				log.Printf("[SETUP] invite bot %d failed (may already be member): %v", i, err)
+			} else {
+				botCtx := withAuth(rpcBaseCtx, bots[i].token)
+				invites, err := memberC.ListRoomInvites(botCtx, &membershipv1.ListRoomInvitesRequest{})
+				if err == nil {
+					for _, inv := range invites.Incoming {
+						if inv.RoomId == bots[0].roomID {
+							_, _ = memberC.AcceptRoomInvite(botCtx, &membershipv1.AcceptRoomInviteRequest{InviteId: inv.Id})
+							break
+						}
 					}
 				}
 			}
@@ -264,6 +284,12 @@ func main() {
 			AudioOnly: !*sendVideo,
 		})
 		if err != nil {
+			if *fastJoin && status.Code(err) == codes.PermissionDenied {
+				log.Fatalf("join voice %s: %v\n"+
+					"  → fast-join requires the API to run in debug mode: go run ./cmd/concord-api -debug=true\n"+
+					"    (or VOICE_DEBUG=true). Against a normal API, re-run this tool with -fast-join=false.",
+					b.handle, err)
+			}
 			log.Fatalf("join voice %s: %v", b.handle, err)
 		}
 		b.voiceToken = vr.VoiceToken
@@ -273,13 +299,58 @@ func main() {
 		if len(vr.Crypto.KeyId) > 0 {
 			b.keyID = vr.Crypto.KeyId[0]
 		}
+		if len(b.keyMaterial) == crypto.KeySize {
+			sc, serr := crypto.NewSessionCryptoDerived(b.keyMaterial, b.roomID, b.keyID)
+			if serr != nil {
+				log.Fatalf("session crypto %s: %v", b.handle, serr)
+			}
+			b.sc = sc
+		}
 		log.Printf("[SETUP] bot %s: endpoint=%s:%d participants=%d", b.handle, b.udpHost, b.udpPort, len(vr.Participants))
 	}
 
-	log.Printf("[TEST] starting %d bots for %v", *numClients, *testDur)
-
 	testCtx, testCancel := context.WithTimeout(ctx, *testDur)
 	defer testCancel()
+
+	var logFile *os.File
+
+	// Run mode: TUI (interactive) vs plain-log (CI/headless). The media demo — a
+	// publisher emitting a real tone + animated video and a monitor decrypting and
+	// rendering it — runs whenever there is somewhere to render or assert it.
+	useTUI := wantTUI()
+	if useTUI {
+		// Route logs to a file so they don't corrupt the TUI's alt-screen.
+		if f, err := os.Create("voicetest.log"); err == nil {
+			logFile = f
+			log.SetOutput(f)
+		}
+	}
+
+	mediaDemo := *numClients >= 2 && (useTUI || *renderDump != "" || *strictCI)
+	var pub, mon *bot
+	if mediaDemo {
+		pub, mon = bots[0], bots[1]
+		pub.role, pub.tone = rolePublisher, &toneSource{}
+		if *sendVideo {
+			pub.video = &videoSource{}
+		}
+		mon.role, mon.tap = roleMonitor, &mediaTap{}
+		if c, err := crypto.NewCipher(mon.keyMaterial); err == nil {
+			mon.rxCipher = c
+		}
+		log.Printf("[MEDIA] publisher=bot%d monitor=bot%d video=%v", pub.idx, mon.idx, *sendVideo)
+	}
+
+	var prog *tea.Program
+	if useTUI {
+		cfg := tuiConfig{clients: *numClients, video: *sendVideo, fastJoin: *fastJoin, duration: *testDur}
+		if mediaDemo {
+			cfg.publisherIdx, cfg.monitorIdx = pub.idx, mon.idx
+		}
+		prog = tea.NewProgram(newTUIModel(st, monTap(mon), cfg), tea.WithAltScreen())
+	}
+
+	log.Printf("[TEST] starting %d bots for %v", *numClients, *testDur)
 
 	var wg sync.WaitGroup
 
@@ -305,30 +376,68 @@ func main() {
 		wg.Add(1)
 		go func(b *bot) { defer wg.Done(); b.pingLoop(testCtx) }(b)
 
+		wg.Add(1)
+		go func(b *bot) { defer wg.Done(); b.churnLoop(testCtx) }(b)
+		wg.Add(1)
+		go func(b *bot) { defer wg.Done(); b.netchangeLoop(testCtx) }(b)
+		wg.Add(1)
+		go func(b *bot) { defer wg.Done(); b.rrLoop(testCtx) }(b)
+
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	tick := time.NewTicker(5 * time.Second)
-	go func() {
-		for {
+	// Once the publisher is welcomed, point the monitor at its SSRCs. Race-free: the
+	// monitor's tap reads these atomics and they stay 0 until this store.
+	if mediaDemo {
+		go func() {
 			select {
-			case <-tick.C:
-				log.Printf("[STATS] %s", st.summary())
+			case <-pub.ready:
+				mon.watchAudioSSRC.Store(pub.ssrc)
+				mon.watchVideoSSRC.Store(pub.videoSSRC)
+				log.Printf("[MEDIA] monitor watching publisher audio_ssrc=%d video_ssrc=%d", pub.ssrc, pub.videoSSRC)
 			case <-testCtx.Done():
-				tick.Stop()
-				return
 			}
-		}
-	}()
+		}()
+	}
+
+	switch {
+	case useTUI:
+		go func() { <-testCtx.Done(); prog.Quit() }()
+		go func() {
+			if _, err := prog.Run(); err != nil {
+				log.Printf("tui error: %v", err)
+			}
+			testCancel() // quitting the TUI ends the run
+		}()
+	case *renderDump != "" && mon != nil:
+		go renderDumpLoop(testCtx, *renderDump, mon.tap, tuiConfig{
+			clients: *numClients, video: *sendVideo, fastJoin: *fastJoin,
+			duration: *testDur, publisherIdx: pub.idx, monitorIdx: mon.idx,
+		})
+		go statsLogLoop(testCtx, st)
+	default:
+		go statsLogLoop(testCtx, st)
+	}
 
 	wg.Wait()
 
+	if useTUI {
+		if prog != nil {
+			prog.Quit()
+		}
+		time.Sleep(80 * time.Millisecond) // let the alt-screen restore
+		log.SetOutput(os.Stderr)
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+	}
+
 	for _, b := range bots {
 		bye := make([]byte, 5)
-		bye[0] = pktBye
+		bye[0] = protocol.PacketTypeBye
 		binary.BigEndian.PutUint32(bye[1:], b.ssrc)
-		b.conn.Write(bye)
-		b.conn.Close()
+		b.getConn().Write(bye)
+		b.getConn().Close()
 	}
 
 	for _, b := range bots {
@@ -339,297 +448,60 @@ func main() {
 	log.Println("========== FINAL ==========")
 	log.Println(st.summary())
 
+	if *strictCI {
+		failed := false
+		fail := func(format string, args ...interface{}) {
+			failed = true
+			log.Printf("[CI-FAIL] "+format, args...)
+		}
+		if st.welcomeOK.Load() < uint64(*numClients) {
+			fail("welcomes=%d < clients=%d (not all bots joined)", st.welcomeOK.Load(), *numClients)
+		}
+		if *numClients > 1 && st.audioRecv.Load() == 0 {
+			fail("audio_rx=0 (no media relayed between %d bots)", *numClients)
+		}
+		if *sendVideo && *numClients > 1 && st.videoRecv.Load() == 0 {
+			fail("video_rx=0 (no video relayed between %d bots)", *numClients)
+		}
+		// End-to-end content integrity: the monitor must actually DECRYPT and DECODE
+		// the publisher's real media, not just receive bytes.
+		if mon != nil && mon.tap != nil {
+			snap := mon.tap.snapshot()
+			if snap.audioFrames == 0 {
+				fail("monitor decoded 0 audio frames from publisher (media pipeline broken)")
+			}
+			if *sendVideo && snap.videoFrames == 0 {
+				fail("monitor decoded 0 video frames from publisher (video pipeline broken)")
+			}
+		}
+		if st.errors.Load() > 0 {
+			fail("errors=%d", st.errors.Load())
+		}
+		if st.pongRecv.Load() > 0 {
+			st.rttMu.Lock()
+			var avg time.Duration
+			if n := len(st.rttSamples); n > 0 {
+				for _, r := range st.rttSamples {
+					avg += r
+				}
+				avg /= time.Duration(n)
+			}
+			st.rttMu.Unlock()
+			if avg > 500*time.Millisecond {
+				fail("avg RTT %v exceeds 500ms", avg)
+			}
+		}
+		if *reportLoss > 0.05 && st.bitrateHints.Load() == 0 {
+			fail("reported %.0f%% loss but received no BitrateHint (feedback loop broken)", *reportLoss*100)
+		}
+		if failed {
+			log.Println("========== CI: FAIL ==========")
+			os.Exit(1)
+		}
+		log.Println("========== CI: PASS ==========")
+	}
+
 	if st.errors.Load() > 0 {
 		os.Exit(1)
 	}
-}
-
-func loginOrRegister(ctx context.Context, c authv1.AuthServiceClient, h, p string) (string, error) {
-	r, err := c.LoginPassword(ctx, &authv1.LoginPasswordRequest{Handle: h, Password: p})
-	if err == nil {
-		return r.AccessToken, nil
-	}
-	r2, err2 := c.Register(ctx, &authv1.RegisterRequest{Handle: h, Password: p, DisplayName: "Bot " + h})
-	if err2 != nil {
-		return "", fmt.Errorf("login: %v; register: %v", err, err2)
-	}
-	return r2.AccessToken, nil
-}
-
-func withAuth(ctx context.Context, token string) context.Context {
-	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
-}
-
-func (b *bot) dial() error {
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", b.udpHost, b.udpPort))
-	if err != nil {
-		return err
-	}
-	c, err := net.DialUDP("udp", nil, addr)
-	if err != nil {
-		return err
-	}
-	c.SetReadBuffer(4 << 20)
-	c.SetWriteBuffer(4 << 20)
-	b.conn = c
-	return nil
-}
-
-func (b *bot) hello() error {
-	payload := map[string]interface{}{
-		"token":         b.voiceToken,
-		"protocol":      1,
-		"codec":         "opus",
-		"room_id":       b.roomID,
-		"user_id":       b.userID,
-		"video_enabled": *sendVideo,
-		"video_codec":   "h264",
-		"crypto": map[string]interface{}{
-			"aead":   "aes-256-gcm",
-			"key_id": []byte{b.keyID},
-		},
-	}
-	js, _ := json.Marshal(payload)
-	pkt := append([]byte{pktHello}, js...)
-	_, err := b.conn.Write(pkt)
-	return err
-}
-
-func (b *bot) recvLoop(ctx context.Context) {
-	buf := make([]byte, 64*1024)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		b.conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-		n, err := b.conn.Read(buf)
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				continue
-			}
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			b.st.errors.Add(1)
-			continue
-		}
-
-		if n < 1 {
-			continue
-		}
-
-		b.st.bytesIn.Add(uint64(n))
-
-		switch buf[0] {
-		case pktWelcome:
-			var w map[string]interface{}
-			if err := json.Unmarshal(buf[1:n], &w); err != nil {
-				log.Printf("[BOT %d] bad welcome json (%d bytes): %v", b.idx, n, err)
-				continue
-			}
-			if v, ok := w["ssrc"].(float64); ok {
-				b.ssrc = uint32(v)
-			}
-			if v, ok := w["video_ssrc"].(float64); ok {
-				b.videoSSRC = uint32(v)
-			}
-			if v, ok := w["screen_ssrc"].(float64); ok {
-				b.screenSSRC = uint32(v)
-			}
-			b.st.welcomeOK.Add(1)
-			log.Printf("[BOT %d] welcome ssrc=%d video=%d screen=%d", b.idx, b.ssrc, b.videoSSRC, b.screenSSRC)
-			select {
-			case <-b.ready:
-			default:
-				close(b.ready)
-			}
-
-		case pktAudio:
-			b.st.audioRecv.Add(1)
-
-		case pktVideo:
-			b.st.videoRecv.Add(1)
-
-		case pktPong:
-			if n >= 9 {
-				sent := int64(binary.BigEndian.Uint64(buf[1:9]))
-				rtt := time.Duration(time.Now().UnixMilli()-sent) * time.Millisecond
-				b.st.pongRecv.Add(1)
-				b.st.addRTT(rtt)
-			}
-
-		case pktHello, pktBye:
-			// ignore control packets not needed by the stress tool
-		}
-	}
-}
-
-func (b *bot) audioLoop(ctx context.Context) {
-	select {
-	case <-b.ready:
-	case <-ctx.Done():
-		return
-	case <-time.After(10 * time.Second):
-		log.Printf("[BOT %d] timeout waiting for welcome, skipping audio", b.idx)
-		return
-	}
-
-	if b.ssrc == 0 {
-		log.Printf("[BOT %d] ssrc=0, skip audio", b.idx)
-		return
-	}
-
-	tick := time.NewTicker(time.Duration(*audioRateMs) * time.Millisecond)
-	defer tick.Stop()
-
-	fakeOpus := make([]byte, 160)
-	rand.Read(fakeOpus)
-
-	var seq uint16
-	var ctr uint64
-	var ts uint32
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tick.C:
-			pkt := b.mediaPkt(pktAudio, 0, codecOpus, b.ssrc, seq, ts, ctr, fakeOpus)
-			if _, err := b.conn.Write(pkt); err != nil {
-				b.st.errors.Add(1)
-			} else {
-				b.st.audioSent.Add(1)
-				b.st.bytesOut.Add(uint64(len(pkt)))
-			}
-			seq++
-			ctr++
-			ts += 960
-		}
-	}
-}
-
-func (b *bot) vidLoop(ctx context.Context) {
-	select {
-	case <-b.ready:
-	case <-ctx.Done():
-		return
-	case <-time.After(3 * time.Second):
-		return
-	}
-
-	if b.videoSSRC == 0 {
-		return
-	}
-
-	tick := time.NewTicker(time.Duration(*videoRateMs) * time.Millisecond)
-	defer tick.Stop()
-
-	fake := make([]byte, 800)
-	rand.Read(fake)
-
-	var seq uint16
-	var ctr uint64
-	var ts uint32
-	var fc int
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tick.C:
-			var flags uint8
-			if fc%90 == 0 {
-				flags = 0x01
-			}
-			pkt := b.mediaPkt(pktVideo, flags, codecH264, b.videoSSRC, seq, ts, ctr, fake)
-			if _, err := b.conn.Write(pkt); err != nil {
-				b.st.errors.Add(1)
-			} else {
-				b.st.videoSent.Add(1)
-				b.st.bytesOut.Add(uint64(len(pkt)))
-			}
-			seq++
-			ctr++
-			ts += 3000
-			fc++
-		}
-	}
-}
-
-func (b *bot) pingLoop(ctx context.Context) {
-	tick := time.NewTicker(5 * time.Second)
-	defer tick.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tick.C:
-			pkt := make([]byte, 9)
-			pkt[0] = pktPing
-			binary.BigEndian.PutUint64(pkt[1:], uint64(time.Now().UnixMilli()))
-			b.conn.Write(pkt)
-		}
-	}
-}
-
-func (b *bot) mediaPkt(typ, flags, codec uint8, ssrc uint32, seq uint16, ts uint32, ctr uint64, payload []byte) []byte {
-	hdr := make([]byte, mediaHeaderSize)
-	hdr[0] = typ
-	hdr[1] = flags
-	hdr[2] = b.keyID
-	hdr[3] = codec
-	binary.BigEndian.PutUint16(hdr[4:6], seq)
-	binary.BigEndian.PutUint32(hdr[6:10], ts)
-	binary.BigEndian.PutUint32(hdr[10:14], ssrc)
-	binary.BigEndian.PutUint64(hdr[14:22], ctr)
-
-	enc := b.seal(hdr, payload, ssrc, ctr)
-	out := make([]byte, mediaHeaderSize+len(enc))
-	copy(out, hdr)
-	copy(out[mediaHeaderSize:], enc)
-	return out
-}
-
-func (b *bot) seal(aad, plaintext []byte, ssrc uint32, counter uint64) []byte {
-	if len(b.keyMaterial) != 32 {
-		return plaintext
-	}
-	nonce := b.nonce(ssrc, counter)
-	block, err := aes.NewCipher(b.keyMaterial)
-	if err != nil {
-		return plaintext
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return plaintext
-	}
-	return gcm.Seal(nil, nonce, plaintext, aad)
-}
-
-func (b *bot) nonce(ssrc uint32, counter uint64) []byte {
-	nb := deriveNonceBase(b.keyMaterial, b.roomID, ssrc, b.keyID)
-	n := make([]byte, nonceSize)
-	copy(n[:nonceBaseSize], nb)
-	binary.BigEndian.PutUint64(n[nonceBaseSize:], counter)
-	return n
-}
-
-func deriveNonceBase(keyMaterial []byte, roomID string, ssrc uint32, keyID byte) []byte {
-	info := []byte("nonce-base\x00")
-	info = append(info, []byte(roomID)...)
-	info = append(info, keyID)
-	buf := make([]byte, 4)
-	binary.BigEndian.PutUint32(buf, ssrc)
-	info = append(info, buf...)
-
-	reader := hkdf.New(sha256.New, keyMaterial, nil, info)
-	out := make([]byte, nonceBaseSize)
-	io.ReadFull(reader, out)
-	return out
 }

@@ -2,6 +2,9 @@ package version
 
 import "fmt"
 
+// concordeFleet holds the registration codes of the Concorde aircraft, indexed
+// by production order. APIMajor selects an entry to serve as the release
+// codename.
 var concordeFleet = []string{
 	"F-WTSS", // 0 - prototype 001
 	"G-BSST", // 1 - prototype 002
@@ -26,15 +29,22 @@ var concordeFleet = []string{
 }
 
 const (
+	// APIMajor, APIMinor, and APIPatch are the semantic version components of the
+	// HTTP/gRPC API; APIMajor also indexes concordeFleet for the codename.
 	APIMajor = 0
 	APIMinor = 3
 	APIPatch = 0
 
+	// VoiceMajor, VoiceMinor, and VoicePatch are the semantic version components of
+	// the voice subsystem, versioned independently of the API.
 	VoiceMajor = 0
 	VoiceMinor = 2
 	VoicePatch = 0
 )
 
+// APICodename returns the Concorde registration used as the release codename for
+// the current APIMajor, falling back to a "post-concorde-N" name if APIMajor is
+// beyond the known fleet.
 func APICodename() string {
 	if APIMajor < len(concordeFleet) {
 		return concordeFleet[APIMajor]
@@ -42,14 +52,20 @@ func APICodename() string {
 	return fmt.Sprintf("post-concorde-%d", APIMajor)
 }
 
+// API returns the full API version string, e.g. "F-WTSS-0.3.0", combining the
+// codename with the major.minor.patch numbers.
 func API() string {
 	return fmt.Sprintf("%s-%d.%d.%d", APICodename(), APIMajor, APIMinor, APIPatch)
 }
 
+// APIShort returns the abbreviated API version with only major.minor, e.g.
+// "F-WTSS-0.3".
 func APIShort() string {
 	return fmt.Sprintf("%s-%d.%d", APICodename(), APIMajor, APIMinor)
 }
 
+// Voice returns the voice subsystem version as "major.minor.patch"; unlike API
+// it carries no codename.
 func Voice() string {
 	return fmt.Sprintf("%d.%d.%d", VoiceMajor, VoiceMinor, VoicePatch)
 }

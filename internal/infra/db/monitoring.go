@@ -8,6 +8,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// PoolMonitor periodically logs pgx pool statistics (connection counts, acquire
+// timings) for observability. It runs a single background goroutine started by
+// Start and stopped by Stop.
 type PoolMonitor struct {
 	pool   *pgxpool.Pool
 	logger *zap.Logger
@@ -15,6 +18,8 @@ type PoolMonitor struct {
 	stop   chan struct{}
 }
 
+// NewPoolMonitor returns a monitor that will emit pool stats every interval once
+// Start is called. It does not begin monitoring on its own.
 func NewPoolMonitor(pool *pgxpool.Pool, logger *zap.Logger, interval time.Duration) *PoolMonitor {
 	return &PoolMonitor{
 		pool:   pool,
@@ -24,6 +29,8 @@ func NewPoolMonitor(pool *pgxpool.Pool, logger *zap.Logger, interval time.Durati
 	}
 }
 
+// Start launches the monitoring goroutine, which logs pool stats on each tick
+// and returns when Stop is called or ctx is cancelled. It does not block.
 func (m *PoolMonitor) Start(ctx context.Context) {
 	go func() {
 		for {
@@ -47,6 +54,9 @@ func (m *PoolMonitor) Start(ctx context.Context) {
 	}()
 }
 
+// Stop halts the ticker and closes the stop channel, terminating the goroutine
+// started by Start. It must be called at most once (a second call panics on the
+// double close).
 func (m *PoolMonitor) Stop() {
 	m.ticker.Stop()
 	close(m.stop)

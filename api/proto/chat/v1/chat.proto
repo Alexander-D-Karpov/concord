@@ -22,6 +22,10 @@ message SendMessageRequest {
   string reply_to_id = 3;
   repeated string mention_user_ids = 4;
   repeated UploadAttachment attachments = 5;
+  concord.common.v1.ForwardInfo forward_info = 6;
+  string media_group_id = 7;
+  string reply_quoted_content = 8;
+  optional bool reply_mention_author = 9;
 }
 
 message SendMessageResponse {
@@ -170,6 +174,15 @@ message StopTypingRequest {
 
 message EmptyResponse {}
 
+message GetMessageEditHistoryRequest {
+  string room_id = 1;
+  string message_id = 2;
+}
+
+message GetMessageEditHistoryResponse {
+  repeated concord.common.v1.EditHistoryEntry entries = 1;
+}
+
 service ChatService {
   rpc SendMessage(SendMessageRequest) returns (SendMessageResponse) {
     option (google.api.http) = {
@@ -274,6 +287,12 @@ service ChatService {
   rpc StopTyping(StopTypingRequest) returns (EmptyResponse) {
     option (google.api.http) = {
       delete: "/v1/rooms/{room_id}/typing"
+    };
+  }
+
+  rpc GetMessageEditHistory(GetMessageEditHistoryRequest) returns (GetMessageEditHistoryResponse) {
+    option (google.api.http) = {
+      get: "/v1/rooms/{room_id}/messages/{message_id}/edit-history"
     };
   }
 }

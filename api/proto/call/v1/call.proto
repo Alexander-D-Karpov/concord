@@ -38,6 +38,8 @@ message JoinVoiceResponse {
   CryptoSuite crypto = 5;
   repeated Participant participants = 6;
   uint32 screen_ssrc = 7;
+  uint32 expires_in = 8;         // voice token TTL in seconds (client refreshes before this)
+  UdpEndpoint tcp_endpoint = 9;  // TCP/TLS fallback endpoint; empty when disabled
 }
 
 message Participant {

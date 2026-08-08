@@ -27,5 +27,6 @@ RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /bin/concord-voice /app/concord-voice
 
-EXPOSE 50000-50049/udp 9001 9101 8082
+# UDP media (single port by default), TCP fallback, control, status, metrics, health
+EXPOSE 50000/udp 8443 9001 9092 9101 8082
 CMD ["/app/concord-voice"]

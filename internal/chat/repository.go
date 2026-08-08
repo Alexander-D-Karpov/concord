@@ -8,11 +8,20 @@ import (
 
 	"github.com/Alexander-D-Karpov/concord/internal/common/errors"
 	"github.com/Alexander-D-Karpov/concord/internal/infra"
+	"github.com/Alexander-D-Karpov/concord/internal/messaging"
+	"github.com/Alexander-D-Karpov/concord/internal/messaging/editing"
+	"github.com/Alexander-D-Karpov/concord/internal/messaging/media"
+	"github.com/Alexander-D-Karpov/concord/internal/messaging/message"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Message is a room (channel) message in this package's domain shape. ID is an
+// int64 Snowflake whose embedded timestamp also drives CreatedAt. EditedAt and
+// DeletedAt are nil until the message is edited or soft-deleted; the Forward*
+// and Reply* fields carry optional forward/reply metadata. It converts to and
+// from the shared messaging.Message via toCore/fromCore.
 type Message struct {
 	ID          int64
 	RoomID      uuid.UUID
@@ -27,8 +36,21 @@ type Message struct {
 	Reactions   []Reaction
 	Attachments []Attachment
 	Mentions    []uuid.UUID
+
+	ForwardFromUserID   *uuid.UUID
+	ForwardFromUserName *string
+	ForwardFromRoomID   *uuid.UUID
+	ForwardFromMsgID    *int64
+	ForwardOriginalTS   *time.Time
+	MediaGroupID        *string
+	ReplyQuotedContent  *string
+	ReplyMentionAuthor  bool
+	EditCount           int32
 }
 
+// Reaction is a single emoji reaction by one user on a message. The
+// (MessageID, UserID, Emoji) triple is unique, so a user can react with a given
+// emoji at most once.
 type Reaction struct {
 	ID        uuid.UUID
 	MessageID int64
@@ -37,6 +59,8 @@ type Reaction struct {
 	CreatedAt time.Time
 }
 
+// Attachment is a stored file (image, etc.) linked to a message. Width and
+// Height are zero for non-image content.
 type Attachment struct {
 	ID          uuid.UUID
 	MessageID   int64
@@ -49,632 +73,256 @@ type Attachment struct {
 	CreatedAt   time.Time
 }
 
+// Repository is the persistence layer for room messages. Most operations are
+// delegated to a shared message.Core configured for the room surface; this type
+// adds room-specific concerns (Snowflake IDs, mention rows, slow-mode lookups).
 type Repository struct {
 	pool      *pgxpool.Pool
 	snowflake *infra.SnowflakeGenerator
+	core      *message.Core
 }
 
+// NewRepository builds a room-message Repository, wiring a message.Core with the
+// room table layout (messages/attachments/reactions/mentions/pins) and the media
+// indexer and edit recorder used inside the core's write transactions.
 func NewRepository(pool *pgxpool.Pool, snowflake *infra.SnowflakeGenerator) *Repository {
-	return &Repository{
-		pool:      pool,
-		snowflake: snowflake,
+	idx := media.NewIndexer()
+	rec := editing.NewRecorder()
+	spec := message.TableSpec{
+		Surface:            messaging.SurfaceRoom,
+		Messages:           "messages",
+		Attachments:        "message_attachments",
+		Reactions:          "message_reactions",
+		Mentions:           "message_mentions",
+		Pinned:             "pinned_messages",
+		PinnedFK:           "room_id",
+		ScopeColumn:        "room_id",
+		ForwardScopeColumn: "forwarded_from_room_id",
+		MaxAttachments:     MaxAttachmentsPerMessage,
+		MediaInsert:        idx.InsertRoomTx,
+		RecordEdit:         rec.RecordRoom,
 	}
+	return &Repository{pool: pool, snowflake: snowflake, core: message.NewCore(pool, spec)}
 }
 
+// toCore projects a package Message onto the shared messaging.Message the
+// message.Core operates on, tagging it with the room surface and moving RoomID
+// into the surface-generic scope pointer.
+func toCore(m *Message) *messaging.Message {
+	rid := m.RoomID
+	core := &messaging.Message{
+		ID:                  m.ID,
+		Surface:             messaging.SurfaceRoom,
+		RoomID:              &rid,
+		AuthorID:            m.AuthorID,
+		Content:             m.Content,
+		CreatedAt:           m.CreatedAt,
+		EditedAt:            m.EditedAt,
+		DeletedAt:           m.DeletedAt,
+		ReplyToID:           m.ReplyToID,
+		ReplyCount:          m.ReplyCount,
+		ReplyQuotedContent:  m.ReplyQuotedContent,
+		ReplyMentionAuthor:  m.ReplyMentionAuthor,
+		Pinned:              m.Pinned,
+		EditCount:           m.EditCount,
+		ForwardFromUserID:   m.ForwardFromUserID,
+		ForwardFromUserName: m.ForwardFromUserName,
+		ForwardFromRoomID:   m.ForwardFromRoomID,
+		ForwardFromMsgID:    m.ForwardFromMsgID,
+		ForwardOriginalTS:   m.ForwardOriginalTS,
+		MediaGroupID:        m.MediaGroupID,
+		Mentions:            m.Mentions,
+	}
+	for _, a := range m.Attachments {
+		core.Attachments = append(core.Attachments, messaging.Attachment(a))
+	}
+	for _, r := range m.Reactions {
+		core.Reactions = append(core.Reactions, messaging.Reaction(r))
+	}
+	return core
+}
+
+// fromCore is the inverse of toCore, rebuilding a package Message from a core
+// result and flattening the scope pointer back into RoomID (nil scope yields the
+// zero UUID).
+func fromCore(c *messaging.Message) *Message {
+	m := &Message{
+		ID:                  c.ID,
+		AuthorID:            c.AuthorID,
+		Content:             c.Content,
+		CreatedAt:           c.CreatedAt,
+		EditedAt:            c.EditedAt,
+		DeletedAt:           c.DeletedAt,
+		ReplyToID:           c.ReplyToID,
+		ReplyCount:          c.ReplyCount,
+		Pinned:              c.Pinned,
+		Mentions:            c.Mentions,
+		ForwardFromUserID:   c.ForwardFromUserID,
+		ForwardFromUserName: c.ForwardFromUserName,
+		ForwardFromRoomID:   c.ForwardFromRoomID,
+		ForwardFromMsgID:    c.ForwardFromMsgID,
+		ForwardOriginalTS:   c.ForwardOriginalTS,
+		MediaGroupID:        c.MediaGroupID,
+		ReplyQuotedContent:  c.ReplyQuotedContent,
+		ReplyMentionAuthor:  c.ReplyMentionAuthor,
+		EditCount:           c.EditCount,
+	}
+	if c.RoomID != nil {
+		m.RoomID = *c.RoomID
+	}
+	for _, a := range c.Attachments {
+		m.Attachments = append(m.Attachments, Attachment(a))
+	}
+	for _, r := range c.Reactions {
+		m.Reactions = append(m.Reactions, Reaction(r))
+	}
+	return m
+}
+
+// Create inserts a message and its attachments in one core transaction.
+// It generates a Snowflake ID when none is set and derives CreatedAt from that
+// ID's embedded timestamp (not the DB clock), then copies the core-assigned
+// attachment IDs/timestamps back onto msg.
 func (r *Repository) Create(ctx context.Context, msg *Message) error {
 	if msg.ID == 0 {
 		msg.ID = r.snowflake.Generate()
 	}
-
-	query := `
-		INSERT INTO messages (id, room_id, author_id, content, reply_to_id, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`
-
 	msg.CreatedAt = r.snowflake.ExtractTimestamp(msg.ID)
 
-	_, err := r.pool.Exec(ctx, query,
-		msg.ID,
-		msg.RoomID,
-		msg.AuthorID,
-		msg.Content,
-		msg.ReplyToID,
-		msg.CreatedAt,
-	)
-
-	if err != nil {
+	core := toCore(msg)
+	if err := r.core.Create(ctx, core); err != nil {
 		return err
 	}
-
-	if len(msg.Attachments) > 0 {
-		attachQuery := `
-			INSERT INTO message_attachments (id, message_id, url, filename, content_type, size, width, height, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		`
-
-		for i := range msg.Attachments {
-			att := &msg.Attachments[i]
-			if att.ID == uuid.Nil {
-				att.ID = uuid.New()
-			}
-			att.MessageID = msg.ID
-			att.CreatedAt = msg.CreatedAt
-
-			_, err := r.pool.Exec(ctx, attachQuery,
-				att.ID,
-				att.MessageID,
-				att.URL,
-				att.Filename,
-				att.ContentType,
-				att.Size,
-				att.Width,
-				att.Height,
-				att.CreatedAt,
-			)
-			if err != nil {
-				return err
-			}
-		}
+	for i := range core.Attachments {
+		msg.Attachments[i].ID = core.Attachments[i].ID
+		msg.Attachments[i].MessageID = core.Attachments[i].MessageID
+		msg.Attachments[i].CreatedAt = core.Attachments[i].CreatedAt
 	}
-
 	return nil
 }
 
+// GetByID loads a single message with its attachments, reactions, and mentions.
+// It does not filter by room; callers that need room scoping compare RoomID
+// themselves.
 func (r *Repository) GetByID(ctx context.Context, id int64) (*Message, error) {
-	query := `
-		SELECT m.id, m.room_id, m.author_id, m.content, m.created_at, m.edited_at, m.deleted_at, 
-		       m.reply_to_id, m.reply_count,
-		       COALESCE((SELECT true FROM pinned_messages WHERE message_id = m.id), false) as pinned
-		FROM messages m
-		WHERE m.id = $1
-	`
-
-	msg := &Message{}
-	err := r.pool.QueryRow(ctx, query, id).Scan(
-		&msg.ID,
-		&msg.RoomID,
-		&msg.AuthorID,
-		&msg.Content,
-		&msg.CreatedAt,
-		&msg.EditedAt,
-		&msg.DeletedAt,
-		&msg.ReplyToID,
-		&msg.ReplyCount,
-		&msg.Pinned,
-	)
-
-	if err == pgx.ErrNoRows {
-		return nil, errors.NotFound("message not found")
-	}
+	c, err := r.core.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-
-	messageIDs := []int64{id}
-
-	reactionsMap, err := r.GetReactionsBatch(ctx, messageIDs)
-	if err != nil {
-		return nil, err
-	}
-	msg.Reactions = reactionsMap[id]
-
-	attachmentsMap, err := r.GetAttachmentsBatch(ctx, messageIDs)
-	if err != nil {
-		return nil, err
-	}
-	msg.Attachments = attachmentsMap[id]
-
-	mentionsMap, err := r.GetMentionsBatch(ctx, messageIDs)
-	if err != nil {
-		return nil, err
-	}
-	msg.Mentions = mentionsMap[id]
-
-	return msg, nil
+	return fromCore(c), nil
 }
 
-func (r *Repository) GetAttachments(ctx context.Context, messageID int64) ([]Attachment, error) {
-	query := `
-		SELECT id, message_id, url, filename, content_type, size, width, height, created_at
-		FROM message_attachments
-		WHERE message_id = $1
-		ORDER BY created_at ASC
-	`
-
-	rows, err := r.pool.Query(ctx, query, messageID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var attachments []Attachment
-	for rows.Next() {
-		var att Attachment
-		if err := rows.Scan(
-			&att.ID,
-			&att.MessageID,
-			&att.URL,
-			&att.Filename,
-			&att.ContentType,
-			&att.Size,
-			&att.Width,
-			&att.Height,
-			&att.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		attachments = append(attachments, att)
-	}
-
-	return attachments, rows.Err()
-}
-
+// ListByRoom returns a page of a room's messages, using beforeID/afterID as
+// exclusive Snowflake cursors for backward/forward paging. limit is clamped to
+// (0,100] and defaults to 50; results come back in ascending ID order.
 func (r *Repository) ListByRoom(ctx context.Context, roomID uuid.UUID, beforeID, afterID *int64, limit int) ([]*Message, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-
-	var query string
-	var args []interface{}
-
-	if beforeID != nil {
-		query = `
-			SELECT m.id, m.room_id, m.author_id, m.content, m.created_at, m.edited_at, m.deleted_at,
-			       m.reply_to_id, m.reply_count,
-			       COALESCE((SELECT true FROM pinned_messages WHERE message_id = m.id), false) as pinned
-			FROM messages m
-			WHERE m.room_id = $1 AND m.id < $2 AND m.deleted_at IS NULL
-			ORDER BY m.id DESC
-			LIMIT $3
-		`
-		args = []interface{}{roomID, *beforeID, limit}
-	} else if afterID != nil {
-		query = `
-			SELECT m.id, m.room_id, m.author_id, m.content, m.created_at, m.edited_at, m.deleted_at,
-			       m.reply_to_id, m.reply_count,
-			       COALESCE((SELECT true FROM pinned_messages WHERE message_id = m.id), false) as pinned
-			FROM messages m
-			WHERE m.room_id = $1 AND m.id > $2 AND m.deleted_at IS NULL
-			ORDER BY m.id ASC
-			LIMIT $3
-		`
-		args = []interface{}{roomID, *afterID, limit}
-	} else {
-		query = `
-			SELECT m.id, m.room_id, m.author_id, m.content, m.created_at, m.edited_at, m.deleted_at,
-			       m.reply_to_id, m.reply_count,
-			       COALESCE((SELECT true FROM pinned_messages WHERE message_id = m.id), false) as pinned
-			FROM messages m
-			WHERE m.room_id = $1 AND m.deleted_at IS NULL
-			ORDER BY m.id DESC
-			LIMIT $2
-		`
-		args = []interface{}{roomID, limit}
-	}
-
-	rows, err := r.pool.Query(ctx, query, args...)
+	cs, err := r.core.List(ctx, roomID, beforeID, afterID, limit, true)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var messages []*Message
-	var messageIDs []int64
-	for rows.Next() {
-		msg := &Message{}
-		if err := rows.Scan(
-			&msg.ID,
-			&msg.RoomID,
-			&msg.AuthorID,
-			&msg.Content,
-			&msg.CreatedAt,
-			&msg.EditedAt,
-			&msg.DeletedAt,
-			&msg.ReplyToID,
-			&msg.ReplyCount,
-			&msg.Pinned,
-		); err != nil {
-			return nil, err
-		}
-		messages = append(messages, msg)
-		messageIDs = append(messageIDs, msg.ID)
+	out := make([]*Message, len(cs))
+	for i, c := range cs {
+		out[i] = fromCore(c)
 	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	if len(messageIDs) > 0 {
-		reactionsMap, err := r.GetReactionsBatch(ctx, messageIDs)
-		if err != nil {
-			return nil, err
-		}
-
-		attachmentsMap, err := r.GetAttachmentsBatch(ctx, messageIDs)
-		if err != nil {
-			return nil, err
-		}
-
-		mentionsMap, err := r.GetMentionsBatch(ctx, messageIDs)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, msg := range messages {
-			msg.Reactions = reactionsMap[msg.ID]
-			msg.Attachments = attachmentsMap[msg.ID]
-			msg.Mentions = mentionsMap[msg.ID]
-		}
-	}
-
-	if beforeID == nil && afterID == nil {
-		for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
-			messages[i], messages[j] = messages[j], messages[i]
-		}
-	}
-
-	return messages, nil
+	return out, nil
 }
 
-func (r *Repository) GetReactionsBatch(ctx context.Context, messageIDs []int64) (map[int64][]Reaction, error) {
-	if len(messageIDs) == 0 {
-		return make(map[int64][]Reaction), nil
-	}
-
-	query := `
-		SELECT id, message_id, user_id, emoji, created_at
-		FROM message_reactions
-		WHERE message_id = ANY($1)
-		ORDER BY created_at ASC
-	`
-
-	rows, err := r.pool.Query(ctx, query, messageIDs)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	result := make(map[int64][]Reaction)
-	for rows.Next() {
-		var reaction Reaction
-		if err := rows.Scan(&reaction.ID, &reaction.MessageID, &reaction.UserID, &reaction.Emoji, &reaction.CreatedAt); err != nil {
-			return nil, err
-		}
-		result[reaction.MessageID] = append(result[reaction.MessageID], reaction)
-	}
-
-	return result, rows.Err()
-}
-
-func (r *Repository) GetAttachmentsBatch(ctx context.Context, messageIDs []int64) (map[int64][]Attachment, error) {
-	if len(messageIDs) == 0 {
-		return make(map[int64][]Attachment), nil
-	}
-
-	query := `
-		SELECT id, message_id, url, filename, content_type, size, width, height, created_at
-		FROM message_attachments
-		WHERE message_id = ANY($1)
-		ORDER BY created_at ASC
-	`
-
-	rows, err := r.pool.Query(ctx, query, messageIDs)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	result := make(map[int64][]Attachment)
-	for rows.Next() {
-		var att Attachment
-		if err := rows.Scan(
-			&att.ID, &att.MessageID, &att.URL, &att.Filename,
-			&att.ContentType, &att.Size, &att.Width, &att.Height, &att.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		result[att.MessageID] = append(result[att.MessageID], att)
-	}
-
-	return result, rows.Err()
-}
-
-func (r *Repository) GetMentionsBatch(ctx context.Context, messageIDs []int64) (map[int64][]uuid.UUID, error) {
-	if len(messageIDs) == 0 {
-		return make(map[int64][]uuid.UUID), nil
-	}
-
-	query := `SELECT message_id, user_id FROM message_mentions WHERE message_id = ANY($1)`
-
-	rows, err := r.pool.Query(ctx, query, messageIDs)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	result := make(map[int64][]uuid.UUID)
-	for rows.Next() {
-		var msgID int64
-		var userID uuid.UUID
-		if err := rows.Scan(&msgID, &userID); err != nil {
-			return nil, err
-		}
-		result[msgID] = append(result[msgID], userID)
-	}
-
-	return result, rows.Err()
-}
-
-func (r *Repository) Update(ctx context.Context, msg *Message) error {
-	query := `
-		UPDATE messages
-		SET content = $2, edited_at = $3
-		WHERE id = $1 AND deleted_at IS NULL
-	`
-
-	msg.EditedAt = timePtr(time.Now())
-
-	result, err := r.pool.Exec(ctx, query, msg.ID, msg.Content, msg.EditedAt)
-	if err != nil {
+// Update applies an edit to a message and refreshes msg.EditedAt/EditCount from
+// the result. The *editing.Recorder argument is intentionally ignored: the
+// previous-content snapshot is recorded inside the core's edit transaction (via
+// the RecordEdit hook configured in NewRepository), so passing a recorder here
+// would double-record.
+func (r *Repository) Update(ctx context.Context, msg *Message, _ *editing.Recorder) error {
+	core := toCore(msg)
+	if err := r.core.Edit(ctx, core); err != nil {
 		return err
 	}
-
-	if result.RowsAffected() == 0 {
-		return errors.NotFound("message not found")
-	}
-
+	msg.EditedAt = core.EditedAt
+	msg.EditCount = core.EditCount
 	return nil
 }
 
+// SoftDelete marks a message deleted (sets deleted_at) without removing the row,
+// so history and reply chains stay intact.
 func (r *Repository) SoftDelete(ctx context.Context, id int64) error {
-	query := `
-		UPDATE messages
-		SET deleted_at = $2
-		WHERE id = $1 AND deleted_at IS NULL
-	`
-
-	result, err := r.pool.Exec(ctx, query, id, time.Now())
-	if err != nil {
-		return err
-	}
-
-	if result.RowsAffected() == 0 {
-		return errors.NotFound("message not found")
-	}
-
-	return nil
+	return r.core.SoftDelete(ctx, id)
 }
 
+// AddReaction records one user's emoji reaction and returns it. The underlying
+// insert is idempotent on (message, user, emoji); the concrete duplicate/error
+// semantics are defined by message.Core.
 func (r *Repository) AddReaction(ctx context.Context, messageID int64, userID uuid.UUID, emoji string) (*Reaction, error) {
-	reaction := &Reaction{
-		ID:        uuid.New(),
-		MessageID: messageID,
-		UserID:    userID,
-		Emoji:     emoji,
-		CreatedAt: time.Now(),
-	}
-
-	query := `
-		INSERT INTO message_reactions (id, message_id, user_id, emoji, created_at)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (message_id, user_id, emoji) DO NOTHING
-		RETURNING created_at
-	`
-
-	err := r.pool.QueryRow(ctx, query, reaction.ID, messageID, userID, emoji, reaction.CreatedAt).Scan(&reaction.CreatedAt)
-	if err == pgx.ErrNoRows {
-		return nil, errors.Conflict("reaction already exists")
-	}
+	cr, err := r.core.AddReaction(ctx, messageID, userID, emoji)
 	if err != nil {
 		return nil, err
 	}
-
-	return reaction, nil
+	out := Reaction(*cr)
+	return &out, nil
 }
 
+// RemoveReaction deletes a user's emoji reaction and returns the removed
+// reaction's ID so callers can broadcast the removal.
 func (r *Repository) RemoveReaction(ctx context.Context, messageID int64, userID uuid.UUID, emoji string) (uuid.UUID, error) {
-	query := `
-		DELETE FROM message_reactions 
-		WHERE message_id = $1 AND user_id = $2 AND emoji = $3
-		RETURNING id
-	`
-
-	var reactionID uuid.UUID
-	err := r.pool.QueryRow(ctx, query, messageID, userID, emoji).Scan(&reactionID)
-	if err == pgx.ErrNoRows {
-		return uuid.Nil, errors.NotFound("reaction not found")
-	}
-	if err != nil {
-		return uuid.Nil, err
-	}
-
-	return reactionID, nil
+	return r.core.RemoveReaction(ctx, messageID, userID, emoji)
 }
 
-func (r *Repository) GetReactions(ctx context.Context, messageID int64) ([]Reaction, error) {
-	query := `
-		SELECT id, message_id, user_id, emoji, created_at
-		FROM message_reactions
-		WHERE message_id = $1
-		ORDER BY created_at ASC
-	`
-
-	rows, err := r.pool.Query(ctx, query, messageID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var reactions []Reaction
-	for rows.Next() {
-		var r Reaction
-		if err := rows.Scan(&r.ID, &r.MessageID, &r.UserID, &r.Emoji, &r.CreatedAt); err != nil {
-			return nil, err
-		}
-		reactions = append(reactions, r)
-	}
-
-	return reactions, rows.Err()
-}
-
+// PinMessage pins a message in a room, recording who pinned it. The pin lives in
+// a separate pinned-messages table keyed by room, not on the message row.
 func (r *Repository) PinMessage(ctx context.Context, roomID uuid.UUID, messageID int64, pinnedBy uuid.UUID) error {
-	query := `
-		INSERT INTO pinned_messages (room_id, message_id, pinned_by)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (room_id, message_id) DO NOTHING
-	`
-
-	_, err := r.pool.Exec(ctx, query, roomID, messageID, pinnedBy)
-	return err
+	return r.core.Pin(ctx, roomID, messageID, pinnedBy)
 }
 
+// UnpinMessage removes a room's pin for the given message.
 func (r *Repository) UnpinMessage(ctx context.Context, roomID uuid.UUID, messageID int64) error {
-	query := `
-		DELETE FROM pinned_messages 
-		WHERE room_id = $1 AND message_id = $2
-	`
-
-	result, err := r.pool.Exec(ctx, query, roomID, messageID)
-	if err != nil {
-		return err
-	}
-
-	if result.RowsAffected() == 0 {
-		return errors.NotFound("pinned message not found")
-	}
-
-	return nil
+	return r.core.Unpin(ctx, roomID, messageID)
 }
 
+// ListPinnedMessages returns a room's pinned messages, newest pin first.
 func (r *Repository) ListPinnedMessages(ctx context.Context, roomID uuid.UUID) ([]*Message, error) {
-	query := `
-		SELECT m.id, m.room_id, m.author_id, m.content, m.created_at, m.edited_at, m.deleted_at,
-		       m.reply_to_id, m.reply_count, true as pinned
-		FROM messages m
-		INNER JOIN pinned_messages pm ON m.id = pm.message_id
-		WHERE pm.room_id = $1 AND m.deleted_at IS NULL
-		ORDER BY pm.pinned_at DESC
-	`
-
-	rows, err := r.pool.Query(ctx, query, roomID)
+	cs, err := r.core.ListPinned(ctx, roomID, false)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var messages []*Message
-	for rows.Next() {
-		msg := &Message{}
-		if err := rows.Scan(
-			&msg.ID,
-			&msg.RoomID,
-			&msg.AuthorID,
-			&msg.Content,
-			&msg.CreatedAt,
-			&msg.EditedAt,
-			&msg.DeletedAt,
-			&msg.ReplyToID,
-			&msg.ReplyCount,
-			&msg.Pinned,
-		); err != nil {
-			return nil, err
-		}
-
-		msg.Reactions, err = r.GetReactions(ctx, msg.ID)
-		if err != nil {
-			return nil, err
-		}
-
-		msg.Attachments, err = r.GetAttachments(ctx, msg.ID)
-		if err != nil {
-			return nil, err
-		}
-
-		messages = append(messages, msg)
+	out := make([]*Message, len(cs))
+	for i, c := range cs {
+		out[i] = fromCore(c)
 	}
-
-	return messages, rows.Err()
+	return out, nil
 }
 
-func (r *Repository) IncrementReplyCount(ctx context.Context, messageID int64) error {
-	query := `
-		UPDATE messages 
-		SET reply_count = reply_count + 1 
-		WHERE id = $1
-	`
-
-	_, err := r.pool.Exec(ctx, query, messageID)
-	return err
-}
-
+// GetThreadReplies returns the replies to parentID (messages whose reply_to is
+// parentID), paginated by limit/offset in ascending ID order.
 func (r *Repository) GetThreadReplies(ctx context.Context, parentID int64, limit, offset int) ([]*Message, error) {
-	query := `
-		SELECT m.id, m.room_id, m.author_id, m.content, m.created_at, m.edited_at, m.deleted_at,
-		       m.reply_to_id, m.reply_count,
-		       COALESCE((SELECT true FROM pinned_messages WHERE message_id = m.id), false) as pinned
-		FROM messages m
-		WHERE m.reply_to_id = $1 AND m.deleted_at IS NULL
-		ORDER BY m.id ASC
-		LIMIT $2 OFFSET $3
-	`
-
-	rows, err := r.pool.Query(ctx, query, parentID, limit, offset)
+	cs, err := r.core.Thread(ctx, parentID, limit, offset, false)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var messages []*Message
-	for rows.Next() {
-		msg := &Message{}
-		if err := rows.Scan(
-			&msg.ID,
-			&msg.RoomID,
-			&msg.AuthorID,
-			&msg.Content,
-			&msg.CreatedAt,
-			&msg.EditedAt,
-			&msg.DeletedAt,
-			&msg.ReplyToID,
-			&msg.ReplyCount,
-			&msg.Pinned,
-		); err != nil {
-			return nil, err
-		}
-
-		msg.Reactions, err = r.GetReactions(ctx, msg.ID)
-		if err != nil {
-			return nil, err
-		}
-
-		msg.Attachments, err = r.GetAttachments(ctx, msg.ID)
-		if err != nil {
-			return nil, err
-		}
-
-		messages = append(messages, msg)
+	out := make([]*Message, len(cs))
+	for i, c := range cs {
+		out[i] = fromCore(c)
 	}
-
-	return messages, rows.Err()
+	return out, nil
 }
 
-func timePtr(t time.Time) *time.Time {
-	return &t
-}
-
+// Search runs a full-text search within a room. The raw query is split by
+// parseSearchQuery into an optional "from:handle" author filter and the
+// remaining text, which is matched against the message search vector via
+// plainto_tsquery. Deleted messages are excluded; results are newest-first.
 func (r *Repository) Search(ctx context.Context, roomID uuid.UUID, query string, limit int) ([]*Message, error) {
 	parsed := parseSearchQuery(query)
 
 	conditions := []string{"m.room_id = $1", "m.deleted_at IS NULL"}
-	args := []interface{}{roomID}
+	args := []any{roomID}
 	argIdx := 2
 
 	if parsed.FTSQuery != "" {
-		conditions = append(conditions, fmt.Sprintf("to_tsvector('simple', m.content) @@ plainto_tsquery('simple', $%d)", argIdx))
+		conditions = append(conditions, fmt.Sprintf("m.search_vector @@ plainto_tsquery('simple', $%d)", argIdx))
 		args = append(args, parsed.FTSQuery)
 		argIdx++
 	}
-
 	if parsed.FromHandle != "" {
 		conditions = append(conditions, fmt.Sprintf(
 			"m.author_id = (SELECT id FROM users WHERE lower(handle) = lower($%d) LIMIT 1)", argIdx))
@@ -682,118 +330,80 @@ func (r *Repository) Search(ctx context.Context, roomID uuid.UUID, query string,
 		argIdx++
 	}
 
-	sqlQuery := fmt.Sprintf(`
-		SELECT m.id, m.room_id, m.author_id, m.content, m.created_at, m.edited_at, m.deleted_at,
-		       m.reply_to_id, m.reply_count,
-		       COALESCE((SELECT true FROM pinned_messages WHERE message_id = m.id), false) as pinned
-		FROM messages m
-		WHERE %s
-		ORDER BY m.id DESC
-		LIMIT $%d
-	`, strings.Join(conditions, " AND "), argIdx)
+	q := fmt.Sprintf(`SELECT %s FROM %s m WHERE %s ORDER BY m.id DESC LIMIT $%d`,
+		r.core.SelectColumns(), r.core.MessagesTable(), strings.Join(conditions, " AND "), argIdx)
 	args = append(args, limit)
 
-	rows, err := r.pool.Query(ctx, sqlQuery, args...)
+	cs, err := r.core.QueryAndLoad(ctx, q, true, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var messages []*Message
-	var messageIDs []int64
-	for rows.Next() {
-		msg := &Message{}
-		if err := rows.Scan(
-			&msg.ID, &msg.RoomID, &msg.AuthorID, &msg.Content,
-			&msg.CreatedAt, &msg.EditedAt, &msg.DeletedAt,
-			&msg.ReplyToID, &msg.ReplyCount, &msg.Pinned,
-		); err != nil {
-			return nil, err
-		}
-		messages = append(messages, msg)
-		messageIDs = append(messageIDs, msg.ID)
+	out := make([]*Message, len(cs))
+	for i, c := range cs {
+		out[i] = fromCore(c)
 	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	if len(messageIDs) > 0 {
-		reactionsMap, _ := r.GetReactionsBatch(ctx, messageIDs)
-		attachmentsMap, _ := r.GetAttachmentsBatch(ctx, messageIDs)
-		mentionsMap, _ := r.GetMentionsBatch(ctx, messageIDs)
-		for _, msg := range messages {
-			msg.Reactions = reactionsMap[msg.ID]
-			msg.Attachments = attachmentsMap[msg.ID]
-			msg.Mentions = mentionsMap[msg.ID]
-		}
-	}
-
-	return messages, nil
+	return out, nil
 }
 
+// parsedSearch is a search string decomposed into its full-text portion
+// (FTSQuery) and an optional author filter (FromHandle).
 type parsedSearch struct {
 	FTSQuery   string
 	FromHandle string
 }
 
+// parseSearchQuery extracts a leading-or-embedded "from:<handle>" token as the
+// author filter and joins the rest as the free-text query. The handle match is
+// case-insensitive; only the last from: token wins.
 func parseSearchQuery(raw string) parsedSearch {
 	p := parsedSearch{}
 	var remaining []string
-
-	parts := strings.Fields(raw)
-	for _, part := range parts {
-		lower := strings.ToLower(part)
-		if strings.HasPrefix(lower, "from:") {
+	for _, part := range strings.Fields(raw) {
+		if strings.HasPrefix(strings.ToLower(part), "from:") {
 			p.FromHandle = strings.TrimPrefix(part, "from:")
 		} else {
 			remaining = append(remaining, part)
 		}
 	}
-
 	p.FTSQuery = strings.Join(remaining, " ")
 	return p
 }
 
+// CreateMentions inserts mention rows linking a message to the mentioned users,
+// skipping duplicates (ON CONFLICT DO NOTHING). It is a no-op for an empty list.
 func (r *Repository) CreateMentions(ctx context.Context, messageID int64, userIDs []uuid.UUID) error {
 	if len(userIDs) == 0 {
 		return nil
 	}
-
-	query := `
-		INSERT INTO message_mentions (message_id, user_id)
-		VALUES ($1, $2)
-		ON CONFLICT DO NOTHING
-	`
-
 	for _, userID := range userIDs {
-		if _, err := r.pool.Exec(ctx, query, messageID, userID); err != nil {
+		if _, err := r.pool.Exec(ctx,
+			`INSERT INTO message_mentions (message_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+			messageID, userID); err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
-func (r *Repository) GetMentions(ctx context.Context, messageID int64) ([]uuid.UUID, error) {
-	query := `
-		SELECT user_id FROM message_mentions WHERE message_id = $1
-	`
+// IncrementReplyCount bumps a parent message's cached reply_count by one; call
+// it when a reply is created so thread counts stay accurate without a subquery.
+func (r *Repository) IncrementReplyCount(ctx context.Context, messageID int64) error {
+	_, err := r.pool.Exec(ctx, `UPDATE messages SET reply_count = reply_count + 1 WHERE id = $1`, messageID)
+	return err
+}
 
-	rows, err := r.pool.Query(ctx, query, messageID)
+// GetRoomSlowMode returns a room's slow-mode interval in seconds (0 = disabled),
+// returning NotFound when the room does not exist.
+func (r *Repository) GetRoomSlowMode(ctx context.Context, roomID uuid.UUID) (int, error) {
+	var slowMode int
+	err := r.pool.QueryRow(ctx,
+		`SELECT COALESCE(slow_mode_interval, 0) FROM rooms WHERE id = $1`, roomID,
+	).Scan(&slowMode)
+	if err == pgx.ErrNoRows {
+		return 0, errors.NotFound("room not found")
+	}
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	defer rows.Close()
-
-	var userIDs []uuid.UUID
-	for rows.Next() {
-		var userID uuid.UUID
-		if err := rows.Scan(&userID); err != nil {
-			return nil, err
-		}
-		userIDs = append(userIDs, userID)
-	}
-
-	return userIDs, rows.Err()
+	return slowMode, nil
 }

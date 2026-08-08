@@ -17,6 +17,11 @@ message BanRequest {
   int64 duration_seconds = 3;
 }
 
+message UnbanRequest {
+  string room_id = 1;
+  string user_id = 2;
+}
+
 message MuteRequest {
   string room_id = 1;
   string user_id = 2;
@@ -24,6 +29,85 @@ message MuteRequest {
 }
 
 message EmptyResponse {}
+
+message BanEntry {
+  string user_id = 1;
+  string banned_by = 2;
+  int64 expires_at = 3; // unix seconds; 0 means permanent
+  int64 created_at = 4;
+}
+
+message ListBansRequest {
+  string room_id = 1;
+}
+
+message ListBansResponse {
+  repeated BanEntry bans = 1;
+}
+
+message MuteEntry {
+  string user_id = 1;
+  string muted_by = 2;
+  int64 created_at = 3;
+}
+
+message ListMutesRequest {
+  string room_id = 1;
+}
+
+message ListMutesResponse {
+  repeated MuteEntry mutes = 1;
+}
+
+message AuditLogEntry {
+  string id = 1;
+  string actor_id = 2;
+  string action = 3;
+  string target_id = 4;
+  string target_type = 5;
+  int64 created_at = 6;
+}
+
+message ListAuditLogRequest {
+  string room_id = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+}
+
+message ListAuditLogResponse {
+  repeated AuditLogEntry entries = 1;
+}
+
+message RoomSettings {
+  int32 slow_mode_interval = 1;
+  string who_can_invite = 2;         // "member" | "moderator"
+  string who_can_post = 3;           // "member" | "moderator"
+  bool is_private = 4;
+  bool require_approval = 5;          // advisory
+  int32 member_cap = 6;              // 0 = unlimited
+  int32 retention_days = 7;          // 0 = keep forever
+  bool link_previews_enabled = 8;    // advisory
+  bool gifs_enabled = 9;             // advisory
+  bool stickers_enabled = 10;        // advisory
+  repeated string word_filters = 11;
+}
+
+message GetRoomSettingsRequest {
+  string room_id = 1;
+}
+
+message GetRoomSettingsResponse {
+  RoomSettings settings = 1;
+}
+
+message UpdateRoomSettingsRequest {
+  string room_id = 1;
+  RoomSettings settings = 2;
+}
+
+message UpdateRoomSettingsResponse {
+  RoomSettings settings = 1;
+}
 
 service AdminService {
   rpc Kick(KickRequest) returns (EmptyResponse) {
@@ -38,9 +122,41 @@ service AdminService {
       body: "*"
     };
   }
+  rpc Unban(UnbanRequest) returns (EmptyResponse) {
+    option (google.api.http) = {
+      post: "/v1/rooms/{room_id}/unban"
+      body: "*"
+    };
+  }
   rpc Mute(MuteRequest) returns (EmptyResponse) {
     option (google.api.http) = {
       post: "/v1/rooms/{room_id}/mute"
+      body: "*"
+    };
+  }
+  rpc ListBans(ListBansRequest) returns (ListBansResponse) {
+    option (google.api.http) = {
+      get: "/v1/rooms/{room_id}/bans"
+    };
+  }
+  rpc ListMutes(ListMutesRequest) returns (ListMutesResponse) {
+    option (google.api.http) = {
+      get: "/v1/rooms/{room_id}/mutes"
+    };
+  }
+  rpc ListAuditLog(ListAuditLogRequest) returns (ListAuditLogResponse) {
+    option (google.api.http) = {
+      get: "/v1/rooms/{room_id}/audit"
+    };
+  }
+  rpc GetRoomSettings(GetRoomSettingsRequest) returns (GetRoomSettingsResponse) {
+    option (google.api.http) = {
+      get: "/v1/rooms/{room_id}/settings"
+    };
+  }
+  rpc UpdateRoomSettings(UpdateRoomSettingsRequest) returns (UpdateRoomSettingsResponse) {
+    option (google.api.http) = {
+      put: "/v1/rooms/{room_id}/settings"
       body: "*"
     };
   }

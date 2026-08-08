@@ -15,6 +15,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// Server is the legacy single-socket UDP data plane. It mirrors ServerPool but
+// binds one socket and wires a Handler with a nil congestion controller, so
+// congestion control is disabled on this path. Prefer ServerPool for production.
 type Server struct {
 	conn     *net.UDPConn
 	handler  *Handler
@@ -27,16 +30,26 @@ type Server struct {
 	workChan   chan *packetJob
 }
 
+// packetJob carries a received datagram (pooled buffer + source address) from the
+// read loop to a worker. The reply socket is the server's single conn, so it is
+// not carried here.
 type packetJob struct {
 	pkt  *packetBuffer
 	addr *net.UDPAddr
 }
 
 const (
+	// workChanSize bounds the in-flight backlog between read loop and workers;
+	// beyond it, datagrams are dropped rather than queued unboundedly.
 	workChanSize = 10000
+	// maxPacketLen is the largest datagram accepted; larger reads are discarded and
+	// each pooled buffer is sized to it.
 	maxPacketLen = 1500
 )
 
+// NewServer binds a single UDP socket at host:port, sets 8 MiB socket buffers
+// (warns but continues if that fails), and builds a Handler with no congestion
+// controller. Returns an error if resolving or binding fails. Call Start to run.
 func NewServer(
 	host string,
 	port int,
@@ -69,6 +82,7 @@ func NewServer(
 		voiceauth.NewValidator(jwtManager),
 		logger,
 		metrics,
+		nil,
 	)
 
 	return &Server{
@@ -82,6 +96,9 @@ func NewServer(
 	}, nil
 }
 
+// Start launches the worker pool (NumCPU*2, min 4) and the single read loop, then
+// blocks until ctx is cancelled, whereupon it stops, closes the socket, waits for
+// all goroutines, and returns nil.
 func (s *Server) Start(ctx context.Context) error {
 	s.logger.Info("UDP server starting", zap.String("address", s.conn.LocalAddr().String()))
 
@@ -106,6 +123,10 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
+// readLoop reads datagrams into pooled buffers and dispatches them to workers via
+// workChan, dropping oversized reads and (on a full queue) excess load. A read
+// error exits only after stopChan closes; otherwise it Releases the buffer and
+// continues.
 func (s *Server) readLoop() {
 	defer s.wg.Done()
 
@@ -142,6 +163,8 @@ func (s *Server) readLoop() {
 	}
 }
 
+// worker dispatches each job through the handler (passing the buffer as owner for
+// fan-out) and Releases the read loop's reference afterward, exiting on stopChan.
 func (s *Server) worker() {
 	defer s.wg.Done()
 

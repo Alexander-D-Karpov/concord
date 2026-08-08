@@ -31,43 +31,52 @@ INCLUDES="-I. \
 -I$PROTO_DEPS_DIR/grpc-gateway \
 -I$PROTO_DEPS_DIR/protobuf/src"
 
-for dir in common/v1 auth/v1 users/v1 rooms/v1 membership/v1 chat/v1 call/v1 registry/v1 admin/v1 friends/v1 dm/v1 unfurl/v1; do
+STREAM_DIRS="stream"
+SKIP_OPENAPI_DIRS="stream common"
+
+GATEWAY_DIRS=""
+OPENAPI_FILES=""
+
+for dir in */v1; do
+    [ -d "$dir" ] || continue
+    ls "$dir"/*.proto >/dev/null 2>&1 || continue
+
+    SERVICE=$(echo "$dir" | cut -d/ -f1)
+
     echo "Generating for $dir..."
 
-    protoc $INCLUDES \
-        --go_out=../gen/go \
-        --go_opt=paths=source_relative \
-        --go-grpc_out=../gen/go \
-        --go-grpc_opt=paths=source_relative \
-        --grpc-gateway_out=../gen/go \
-        --grpc-gateway_opt=paths=source_relative \
-        --grpc-gateway_opt=generate_unbound_methods=true \
-        "$dir"/*.proto
+    if echo "$STREAM_DIRS" | grep -qw "$SERVICE"; then
+        protoc $INCLUDES \
+            --go_out=../gen/go \
+            --go_opt=paths=source_relative \
+            --go-grpc_out=../gen/go \
+            --go-grpc_opt=paths=source_relative \
+            "$dir"/*.proto
+    else
+        protoc $INCLUDES \
+            --go_out=../gen/go \
+            --go_opt=paths=source_relative \
+            --go-grpc_out=../gen/go \
+            --go-grpc_opt=paths=source_relative \
+            --grpc-gateway_out=../gen/go \
+            --grpc-gateway_opt=paths=source_relative \
+            --grpc-gateway_opt=generate_unbound_methods=true \
+            "$dir"/*.proto
+    fi
+
+    if ! echo "$SKIP_OPENAPI_DIRS" | grep -qw "$SERVICE"; then
+        OPENAPI_FILES="$OPENAPI_FILES $dir/*.proto"
+    fi
 done
 
-echo "Generating for stream/v1..."
-protoc $INCLUDES \
-    --go_out=../gen/go \
-    --go_opt=paths=source_relative \
-    --go-grpc_out=../gen/go \
-    --go-grpc_opt=paths=source_relative \
-    stream/v1/*.proto
-
-echo "Generating OpenAPI spec..."
-protoc $INCLUDES \
-    --openapiv2_out=../gen/openapiv2 \
-    --openapiv2_opt=allow_merge=true \
-    --openapiv2_opt=merge_file_name=concord \
-    --openapiv2_opt=openapi_naming_strategy=fqn \
-    auth/v1/*.proto \
-    users/v1/*.proto \
-    rooms/v1/*.proto \
-    membership/v1/*.proto \
-    chat/v1/*.proto \
-    call/v1/*.proto \
-    friends/v1/*.proto \
-    dm/v1/*.proto \
-    admin/v1/*.proto \
-    unfurl/v1/*.proto
+if [ -n "$OPENAPI_FILES" ]; then
+    echo "Generating OpenAPI spec..."
+    eval protoc $INCLUDES \
+        --openapiv2_out=../gen/openapiv2 \
+        --openapiv2_opt=allow_merge=true \
+        --openapiv2_opt=merge_file_name=concord \
+        --openapiv2_opt=openapi_naming_strategy=fqn \
+        $OPENAPI_FILES
+fi
 
 echo "Protobuf generation complete!"

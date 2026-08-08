@@ -6,6 +6,10 @@ import (
 	"os"
 )
 
+// LoadTLSConfig builds a mutual-TLS config: it loads the server key pair and a CA
+// bundle used to require and verify client certificates (RequireAndVerifyClientCert).
+// The config pins TLS 1.3 minimum and a fixed AEAD cipher suite list. Returns an
+// error if the key pair or CA file cannot be read.
 func LoadTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
@@ -33,6 +37,9 @@ func LoadTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
 	}, nil
 }
 
+// ServerTLSConfig builds a server-only TLS config from the given key pair, pinning
+// TLS 1.3 and the same AEAD cipher suites but performing no client-certificate
+// verification. Use LoadTLSConfig instead when mutual TLS is required.
 func ServerTLSConfig(certFile, keyFile string) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
