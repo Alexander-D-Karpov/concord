@@ -62,7 +62,7 @@ func banCmd() *cobra.Command {
 				}
 				if err := repo.RemoveMember(ctx, roomID, targetID); err != nil {
 					// Not a member (or already removed) is fine; the ban still applies.
-					fmt.Fprintf(cmd.ErrOrStderr(), "note: could not remove membership: %v\n", err)
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "note: could not remove membership: %v\n", err)
 				}
 				_ = audit.NewLogger(pool, zap.NewNop()).Log(ctx, audit.Event{
 					RoomID: room, UserID: actor.String(), Action: "user.ban",

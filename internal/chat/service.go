@@ -94,8 +94,6 @@ const (
 	membershipCacheTTL = 30 * time.Second
 	// messageCacheTTL is how long a single fetched message is cached.
 	messageCacheTTL = 5 * time.Minute
-	// slowModeCfgTTL is how long a room's slow-mode interval is cached.
-	slowModeCfgTTL = 60 * time.Second
 	// pinnedTTL is how long a room's pinned-message list is cached.
 	pinnedTTL = 10 * time.Minute
 )
@@ -135,26 +133,6 @@ func (s *Service) isMember(ctx context.Context, roomID, userID uuid.UUID) (bool,
 		return false, err
 	}
 	return true, nil
-}
-
-// getRoomSlowMode returns a room's slow-mode interval, read-through cached under
-// "room:slowmode:<room>" for slowModeCfgTTL. With no cache configured it queries
-// the repo directly.
-func (s *Service) getRoomSlowMode(ctx context.Context, roomID uuid.UUID) (int, error) {
-	if s.cache == nil {
-		return s.repo.GetRoomSlowMode(ctx, roomID)
-	}
-	key := fmt.Sprintf("room:slowmode:%s", roomID)
-	var sm int
-	if err := s.cache.Get(ctx, key, &sm); err == nil {
-		return sm, nil
-	}
-	sm, err := s.repo.GetRoomSlowMode(ctx, roomID)
-	if err != nil {
-		return 0, err
-	}
-	_ = s.cache.Set(ctx, key, sm, slowModeCfgTTL)
-	return sm, nil
 }
 
 // SendMessage validates and persists a new room message, then fans out events.

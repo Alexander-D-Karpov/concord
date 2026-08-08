@@ -67,7 +67,7 @@ type Service struct {
 // sessionStore is the in-memory index of active voice sessions and per-room
 // placement (crypto suite, assigned UDP port, server id), all guarded by mu.
 // portCount bounds the deterministic per-room port fan-out from a server's base
-// port; nextPort is currently unused.
+// port.
 type sessionStore struct {
 	mu         sync.RWMutex
 	byRoom     map[string]map[string]*VoiceSession
@@ -76,7 +76,6 @@ type sessionStore struct {
 	roomPort   map[string]int
 	roomServer map[string]string
 	portCount  int
-	nextPort   int
 }
 
 // VoiceSession is one user's membership in a room's voice call, with media

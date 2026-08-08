@@ -109,7 +109,7 @@ func (s *Server) Start(ctx context.Context, port int) error {
 // and on exit removes any session bound to this connection so a dropped TCP
 // client is torn down promptly.
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	tp := &tcpTransport{conn: conn}
 	synthAddr := synthUDPAddr(conn.RemoteAddr())
 

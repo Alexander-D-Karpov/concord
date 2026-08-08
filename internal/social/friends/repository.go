@@ -75,10 +75,6 @@ func NewRepositoryWithCache(pool *pgxpool.Pool, c *cache.Cache) *Repository {
 const (
 	// friendListCacheTTL is how long a cached friend list stays valid.
 	friendListCacheTTL = 2 * time.Minute
-	// friendshipCacheTTL is how long a cached friendship record stays valid.
-	friendshipCacheTTL = 1 * time.Minute
-	// pendingRequestsTTL is how long cached pending-request data stays valid.
-	pendingRequestsTTL = 30 * time.Second
 	// areFriendsCacheTTL is how long a cached are-friends boolean stays valid.
 	areFriendsCacheTTL = 5 * time.Minute
 )

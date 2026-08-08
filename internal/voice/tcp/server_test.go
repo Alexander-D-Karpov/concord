@@ -15,8 +15,8 @@ func TestTCPTransportFraming(t *testing.T) {
 	var _ session.Transport = (*tcpTransport)(nil)
 
 	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
+	defer func() { _ = c1.Close() }()
+	defer func() { _ = c2.Close() }()
 
 	tp := &tcpTransport{conn: c1}
 	payload := []byte("hello-voice-frame")

@@ -81,10 +81,6 @@ func NewService(
 const (
 	// dmParticipantTTL is how long a participation check is cached.
 	dmParticipantTTL = 60 * time.Second
-	// dmChannelTTL is how long a fetched channel is cached.
-	dmChannelTTL = 5 * time.Minute
-	// dmMessageTTL is the cache lifetime reserved for individual DM messages.
-	dmMessageTTL = 5 * time.Minute
 )
 
 // isParticipant reports whether userID belongs to a channel, read-through cached
@@ -105,26 +101,6 @@ func (s *Service) isParticipant(ctx context.Context, channelID, userID uuid.UUID
 		}
 	}
 	return s.repo.IsParticipant(ctx, channelID, userID)
-}
-
-// getChannel loads a channel, read-through cached under "dm:ch:<channel>" for
-// dmChannelTTL. Pair mutations that change HasActiveCall must invalidate this
-// key via invalidateChannel.
-func (s *Service) getChannel(ctx context.Context, channelID uuid.UUID) (*DMChannel, error) {
-	if s.cache == nil {
-		return s.repo.GetByID(ctx, channelID)
-	}
-	key := fmt.Sprintf("dm:ch:%s", channelID)
-	var cached DMChannel
-	if err := s.cache.Get(ctx, key, &cached); err == nil {
-		return &cached, nil
-	}
-	ch, err := s.repo.GetByID(ctx, channelID)
-	if err != nil {
-		return nil, err
-	}
-	_ = s.cache.Set(ctx, key, ch, dmChannelTTL)
-	return ch, nil
 }
 
 // invalidateChannel drops the cached "dm:ch:<channel>" entry so the next

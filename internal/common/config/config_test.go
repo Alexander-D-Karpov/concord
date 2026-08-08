@@ -6,8 +6,8 @@ import (
 )
 
 func TestPushConfigDefaults(t *testing.T) {
-	os.Unsetenv("PUSH_ENABLED")
-	os.Unsetenv("PUSH_CREDENTIALS_FILE")
+	_ = os.Unsetenv("PUSH_ENABLED")
+	_ = os.Unsetenv("PUSH_CREDENTIALS_FILE")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)

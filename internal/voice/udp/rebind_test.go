@@ -51,7 +51,7 @@ func TestRepeatHelloRebindsSameSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	tok, err := jm.GenerateVoiceToken("user-1", "room-1", "srv-1", time.Hour)
 	if err != nil {
@@ -87,7 +87,7 @@ func TestRepeatHelloRebindsSameSession(t *testing.T) {
 func TestInvalidTokenHelloRejected(t *testing.T) {
 	h, sm, _ := newTestHandler(t)
 	conn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	h.HandlePacket(helloPacket(t, "not-a-valid-token"), &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40003}, conn)
 	if got := len(sm.GetAllSessions()); got != 0 {
@@ -100,7 +100,7 @@ func TestInvalidTokenHelloRejected(t *testing.T) {
 func TestEvictionWindowExceedsClientReconnect(t *testing.T) {
 	h, sm, jm := newTestHandler(t)
 	conn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	tok, _ := jm.GenerateVoiceToken("user-2", "room-2", "srv-1", time.Hour)
 	h.HandlePacket(helloPacket(t, tok), &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40004}, conn)

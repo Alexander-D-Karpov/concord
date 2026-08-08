@@ -11,19 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func seedRoomDirect(t *testing.T, pool interface {
-	QueryRow(ctx context.Context, sql string, args ...any) interface{ Scan(...any) error }
-}, owner uuid.UUID) uuid.UUID {
-	t.Helper()
-	var id uuid.UUID
-	err := pool.QueryRow(context.Background(),
-		`INSERT INTO rooms (name, created_by) VALUES ($1, $2) RETURNING id`,
-		"room-"+uuid.NewString()[:8], owner,
-	).Scan(&id)
-	require.NoError(t, err)
-	return id
-}
-
 func TestChatMessageCore_Characterization(t *testing.T) {
 	pool := testutil.Pool(t)
 	testutil.Truncate(t, pool, "messages", "message_reactions", "pinned_messages", "memberships", "rooms", "users")

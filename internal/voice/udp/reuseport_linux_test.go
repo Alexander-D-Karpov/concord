@@ -15,12 +15,12 @@ func TestReusePortAllowsDuplicateBind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first bind: %v", err)
 	}
-	defer pc1.Close()
+	defer func() { _ = pc1.Close() }()
 
 	addr := pc1.LocalAddr().String()
 	pc2, err := lc.ListenPacket(context.Background(), "udp", addr)
 	if err != nil {
 		t.Fatalf("second bind to %s should succeed with SO_REUSEPORT: %v", addr, err)
 	}
-	defer pc2.Close()
+	defer func() { _ = pc2.Close() }()
 }

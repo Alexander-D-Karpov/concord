@@ -408,7 +408,7 @@ func (s *Service) CreatePoll(ctx context.Context, req *featuresv1.CreatePollRequ
 	if err != nil {
 		return nil, errors.ToGRPCError(errors.Internal("tx begin failed", err))
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	content := fmt.Sprintf("📊 %s", req.Question)
 	if roomID != nil {
@@ -492,7 +492,7 @@ func (s *Service) VotePoll(ctx context.Context, req *featuresv1.VotePollRequest)
 	if err != nil {
 		return nil, errors.ToGRPCError(errors.Internal("tx failed", err))
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	if !allowsMultiple {
 		_ = s.repo.DeleteUserPollVotes(ctx, tx, pollUUID, userUUID)

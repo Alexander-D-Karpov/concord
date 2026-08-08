@@ -20,7 +20,7 @@ func (c *Core) Edit(ctx context.Context, m *messaging.Message) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var prev string
 	err = tx.QueryRow(ctx,

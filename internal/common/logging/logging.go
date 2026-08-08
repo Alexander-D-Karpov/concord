@@ -222,7 +222,7 @@ func Init(level, format, output string, enableFile bool, filePath string) (*zap.
 	var cores []zapcore.Core
 
 	if stdoutSink {
-		var ws zapcore.WriteSyncer = zapcore.AddSync(os.Stdout)
+		ws := zapcore.AddSync(os.Stdout)
 		if statusActive {
 			// Route stdout through the bar so every log line lands above it.
 			statusBar = &statusWriter{out: os.Stdout, active: true}

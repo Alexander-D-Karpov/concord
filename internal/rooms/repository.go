@@ -94,12 +94,6 @@ func NewRepositoryWithCache(pool *pgxpool.Pool, c *cache.Cache) *Repository {
 const (
 	// roomCacheTTL is how long a room record is cached.
 	roomCacheTTL = 5 * time.Minute
-	// memberCacheTTL is how long a single membership is cached.
-	memberCacheTTL = 30 * time.Second
-	// memberListCacheTTL is how long a room's member list is cached.
-	memberListCacheTTL = 1 * time.Minute
-	// userRoomsCacheTTL is how long a user's room list is cached.
-	userRoomsCacheTTL = 1 * time.Minute
 )
 
 // roomCacheKey is the cache key for a single room record.

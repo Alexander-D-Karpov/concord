@@ -75,19 +75,6 @@ func NewService(roomRepo *rooms.Repository, hub *events.Hub, aside *cache.AsideP
 	return &Service{roomRepo: roomRepo, hub: hub, cache: aside}
 }
 
-// invalidateMembership drops the cached membership and user-rooms-list keys for a
-// (room, user) pair — the rooms package owns these keys, so membership mutations
-// must clear them here. No-op without a cache.
-func (s *Service) invalidateMembership(ctx context.Context, roomID, userID uuid.UUID) {
-	if s.cache == nil {
-		return
-	}
-	_ = s.cache.Invalidate(ctx,
-		fmt.Sprintf("m:%s:%s", roomID, userID),
-		fmt.Sprintf("u:%s:rooms", userID),
-	)
-}
-
 // CreateRoomInvite invites userID to a room on behalf of the caller. The caller
 // must be a member (Forbidden otherwise), cannot invite themselves, cannot invite
 // an existing member (Conflict), and cannot duplicate a still-pending invite

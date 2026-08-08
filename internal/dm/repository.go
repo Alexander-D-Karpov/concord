@@ -404,7 +404,7 @@ func (r *MessageRepository) Create(ctx context.Context, msg *DMMessage) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO dm_messages (
@@ -492,7 +492,7 @@ func (r *MessageRepository) Update(ctx context.Context, msg *DMMessage, recorder
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var prev string
 	err = tx.QueryRow(ctx,

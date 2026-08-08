@@ -55,12 +55,12 @@ func TestSendWorkerFallsBackToDefaultConnForTCPOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer recv.Close()
+	defer func() { _ = recv.Close() }()
 	egress, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer egress.Close()
+	defer func() { _ = egress.Close() }()
 
 	r := &Router{
 		logger:        zap.NewNop(),
@@ -103,12 +103,12 @@ func TestRouteMediaForwardsAllVideoLayersWithoutPref(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer recv.Close()
+	defer func() { _ = recv.Close() }()
 	egress, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer egress.Close()
+	defer func() { _ = egress.Close() }()
 
 	mgr := session.NewManager()
 	sender := mgr.CreateSession("A", "room-1", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}, nil, true, false)

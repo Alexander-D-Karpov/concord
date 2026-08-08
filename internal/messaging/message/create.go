@@ -32,7 +32,7 @@ func (c *Core) Create(ctx context.Context, m *messaging.Message) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	insertQ := fmt.Sprintf(`INSERT INTO %s (
 		id, %s, author_id, content, created_at, reply_to_id,

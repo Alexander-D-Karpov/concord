@@ -119,7 +119,7 @@ func (s *Service) Create(ctx context.Context, req *featuresv1.CreatePollRequest)
 	if err != nil {
 		return nil, errors.Internal("tx begin failed", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	content := fmt.Sprintf("📊 %s", req.Question)
 	if roomID != nil {
@@ -239,7 +239,7 @@ func (s *Service) Vote(ctx context.Context, req *featuresv1.VotePollRequest) (*f
 	if err != nil {
 		return nil, errors.Internal("tx failed", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	if !allowsMultiple {
 		if err := s.repo.DeleteUserVotesTx(ctx, tx, pollUUID, userUUID); err != nil {
