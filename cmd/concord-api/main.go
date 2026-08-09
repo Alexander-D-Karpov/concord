@@ -498,7 +498,17 @@ func run() error {
 		httpMux.Handle("/docs", http.RedirectHandler("/docs/", http.StatusMovedPermanently))
 		logger.Info("swagger UI available at /docs")
 	}
-	httpMux.Handle("/", httpGateway)
+	// The root path serves the API docs (Swagger UI); every other path falls
+	// through to the REST gateway. This is the catch-all handler, so it must
+	// delegate non-root requests to the gateway to keep /v1/... working. When
+	// swagger is unavailable, "/" is handled by the gateway as before.
+	httpMux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" && swaggerHandler != nil {
+			http.Redirect(w, r, "/docs/", http.StatusFound)
+			return
+		}
+		httpGateway.ServeHTTP(w, r)
+	}))
 
 	httpMux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
