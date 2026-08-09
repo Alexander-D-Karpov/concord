@@ -54,6 +54,16 @@ services:
       STORAGE_PATH: /media
       STORAGE_URL: /files
 
+      # --- Voice topology (MUST match the voice service) ---
+      # The API advertises the voice endpoint to clients, so it has to agree with
+      # the voice server on single-port mode and the TCP fallback port. If these
+      # drift, the API advertises a hashed UDP port (basePort+hash%count) or an
+      # empty tcp_endpoint that nothing is listening on, and clients time out.
+      VOICE_SINGLE_PORT: ${VOICE_SINGLE_PORT:-true}
+      VOICE_PUBLIC_UDP_PORT: ${VOICE_PUBLIC_UDP_PORT:-50000}
+      VOICE_UDP_PORT_COUNT: ${VOICE_UDP_PORT_COUNT:-50}
+      VOICE_TCP_PORT: ${VOICE_TCP_PORT:-8443}
+
     volumes:
       - /var/www/media/concord:/media
 
