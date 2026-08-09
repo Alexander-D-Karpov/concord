@@ -191,3 +191,33 @@ OAUTH_GOOGLE_REDIRECT_URL=https://app.example.com/oauth/callback   # comma-separ
 OAuth login also requires Redis (it stores per-request PKCE state). Adding a new
 provider is a one-line entry in `oauth.Registry` (`internal/auth/oauth`) plus its
 `OAUTH_<NAME>_*` env vars.
+
+### Deploying Google for a desktop (loopback) client
+
+The Electron/desktop client uses the loopback flow: it sends
+`http://127.0.0.1:<ephemeral-port>/callback` as the redirect. The server allows any
+loopback redirect (`http`, host `127.0.0.1`/`::1`/`localhost`, **any port, any
+path**) by rule, so there is no fixed URI to allowlist.
+
+1. In Google Cloud console, create an **OAuth 2.0 client of type "Desktop app"**.
+   Desktop clients have the `http://127.0.0.1` loopback redirect built in — the
+   console does not ask for a redirect URI. (Prefer the `127.0.0.1` IP over
+   `localhost`.)
+2. Set on the backend and recreate the api container:
+
+   ```
+   OAUTH_GOOGLE_CLIENT_ID=<desktop client id>
+   OAUTH_GOOGLE_CLIENT_SECRET=<desktop client secret>
+   OAUTH_GOOGLE_REDIRECT_URL=            # leave empty — loopback needs no allowlist entry
+   ```
+
+3. Verify: `curl -s <api>/v1/auth/methods | jq` lists `google`.
+
+Notes:
+- Do **not** pin a port in `OAUTH_GOOGLE_REDIRECT_URL`; the client binds a fresh
+  ephemeral port each launch, so any fixed `127.0.0.1:PORT` value would reject it.
+- If `begin` returns `"OAuth not configured"`, the client id/secret are not set. If
+  it returns `"OAuth provider not available"`, the credentials are set but the
+  startup OIDC discovery check to `accounts.google.com` did not pass (check the api
+  logs for `oauth: provider withheld`).
+- OAuth also requires Redis to be enabled (it holds per-request PKCE state).
