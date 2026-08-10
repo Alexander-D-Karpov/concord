@@ -21,12 +21,18 @@ RUN make proto
 
 RUN go build -o /bin/concord-api ./cmd/concord-api
 
+# The operator CLI ships in the same image so `docker compose exec api
+# concord-cli ...` works against the running stack (it reads the same DB/Redis
+# env the API container already has).
+RUN go build -o /bin/concord-cli ./cmd/concord-cli
+
 # Final stage
 FROM alpine:3.19
 WORKDIR /app
 RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /bin/concord-api /app/concord-api
+COPY --from=builder /bin/concord-cli /usr/local/bin/concord-cli
 COPY --from=builder /app/api/gen/openapiv2/ /app/api/gen/openapiv2/
 
 EXPOSE 8080 9000 9100 8081

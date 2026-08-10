@@ -140,5 +140,34 @@ services:
       # TCP/TLS fallback - PUBLIC (set VOICE_TCP_PORT=0 to disable the server).
       - "${VOICE_TCP_HOST_PORT:-8443}:${VOICE_TCP_PORT:-8443}"
 
+  # Operator CLI. Reuses the API image (concord-cli lives at /usr/local/bin) and
+  # the same DB/Redis env, but never starts with `up` thanks to the "cli"
+  # profile. Run one-off commands (waits for the DB to be healthy first):
+  #
+  #   docker compose run --rm cli user set-password --handle sanspie
+  #   docker compose run --rm cli migrate
+  #   docker compose run --rm cli --help
+  #
+  # It gets an interactive TTY, so the secure password prompt works. If the API
+  # is already running you can skip this service entirely and exec into it:
+  #   docker compose exec api concord-cli user set-password --handle sanspie
+  cli:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    profiles: ["cli"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    environment:
+      DB_HOST: postgres
+      REDIS_HOST: redis
+    entrypoint: ["concord-cli"]
+    restart: "no"
+
 volumes:
   postgres_data:
