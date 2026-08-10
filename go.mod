@@ -17,7 +17,8 @@ require (
 	golang.org/x/image v0.36.0
 	golang.org/x/net v0.45.0
 	golang.org/x/oauth2 v0.32.0
-	golang.org/x/sys v0.37.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 	golang.org/x/time v0.14.0
 	google.golang.org/genproto/googleapis/api v0.0.0-20250929231259-57b25ae835d4
 	google.golang.org/grpc v1.76.0

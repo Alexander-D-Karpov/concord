@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
+	"strings"
 
 	"github.com/Alexander-D-Karpov/concord/internal/common/config"
 	"github.com/Alexander-D-Karpov/concord/internal/infra/cache"
@@ -11,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/term"
 )
 
 // userCmd groups the user-administration subcommands.
@@ -18,6 +22,47 @@ func userCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "user", Short: "Manage users"}
 	cmd.AddCommand(userCreateCmd(), userSetPasswordCmd(), userUnlockCmd(), userSetRoleCmd())
 	return cmd
+}
+
+// readPassword obtains a password without exposing it in the process's argv
+// (and thus shell history / `ps`). Priority: the --password flag if given
+// (kept for back-compat and scripting), then --password-stdin (read a piped
+// value), then an interactive no-echo prompt. When confirm is set, the
+// interactive path asks twice and requires a match.
+func readPassword(cmd *cobra.Command, flagVal string, fromStdin, confirm bool) (string, error) {
+	if flagVal != "" {
+		return flagVal, nil
+	}
+	if fromStdin {
+		data, err := io.ReadAll(cmd.InOrStdin())
+		if err != nil {
+			return "", fmt.Errorf("read password from stdin: %w", err)
+		}
+		return strings.TrimRight(string(data), "\r\n"), nil
+	}
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return "", fmt.Errorf("no --password given and stdin is not a terminal; pipe it with --password-stdin")
+	}
+	out := cmd.ErrOrStderr()
+	fmt.Fprint(out, "Enter password: ")
+	first, err := term.ReadPassword(fd)
+	fmt.Fprintln(out)
+	if err != nil {
+		return "", fmt.Errorf("read password: %w", err)
+	}
+	if confirm {
+		fmt.Fprint(out, "Confirm password: ")
+		second, err := term.ReadPassword(fd)
+		fmt.Fprintln(out)
+		if err != nil {
+			return "", fmt.Errorf("read password: %w", err)
+		}
+		if string(first) != string(second) {
+			return "", fmt.Errorf("passwords do not match")
+		}
+	}
+	return string(first), nil
 }
 
 // resolveUserID resolves a handle or UUID string to a user UUID.
@@ -35,12 +80,17 @@ func resolveUserID(ctx context.Context, pool *pgxpool.Pool, s string) (uuid.UUID
 
 func userCreateCmd() *cobra.Command {
 	var handle, password, displayName string
+	var passwordStdin bool
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a user with a password",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if handle == "" || password == "" {
-				return fmt.Errorf("--handle and --password are required")
+			if handle == "" {
+				return fmt.Errorf("--handle is required")
+			}
+			password, err := readPassword(cmd, password, passwordStdin, true)
+			if err != nil {
+				return err
 			}
 			if len(password) < 6 {
 				return fmt.Errorf("password must be at least 6 characters")
@@ -67,19 +117,25 @@ func userCreateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&handle, "handle", "", "user handle (required)")
-	cmd.Flags().StringVar(&password, "password", "", "password (required, min 6 chars)")
+	cmd.Flags().StringVar(&password, "password", "", "password (min 6 chars; if omitted, prompt securely)")
+	cmd.Flags().BoolVar(&passwordStdin, "password-stdin", false, "read the password from stdin instead of a flag")
 	cmd.Flags().StringVar(&displayName, "display-name", "", "display name (defaults to handle)")
 	return cmd
 }
 
 func userSetPasswordCmd() *cobra.Command {
 	var handle, password string
+	var passwordStdin bool
 	cmd := &cobra.Command{
 		Use:   "set-password",
 		Short: "Set a user's password",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if handle == "" || password == "" {
-				return fmt.Errorf("--handle and --password are required")
+			if handle == "" {
+				return fmt.Errorf("--handle is required")
+			}
+			password, err := readPassword(cmd, password, passwordStdin, true)
+			if err != nil {
+				return err
 			}
 			if len(password) < 6 {
 				return fmt.Errorf("password must be at least 6 characters")
@@ -102,7 +158,8 @@ func userSetPasswordCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&handle, "handle", "", "user handle (required)")
-	cmd.Flags().StringVar(&password, "password", "", "new password (required, min 6 chars)")
+	cmd.Flags().StringVar(&password, "password", "", "new password (min 6 chars; if omitted, prompt securely)")
+	cmd.Flags().BoolVar(&passwordStdin, "password-stdin", false, "read the new password from stdin instead of a flag")
 	return cmd
 }
 
