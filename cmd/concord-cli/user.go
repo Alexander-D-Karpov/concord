@@ -45,16 +45,16 @@ func readPassword(cmd *cobra.Command, flagVal string, fromStdin, confirm bool) (
 		return "", fmt.Errorf("no --password given and stdin is not a terminal; pipe it with --password-stdin")
 	}
 	out := cmd.ErrOrStderr()
-	fmt.Fprint(out, "Enter password: ")
+	_, _ = fmt.Fprint(out, "Enter password: ")
 	first, err := term.ReadPassword(fd)
-	fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out)
 	if err != nil {
 		return "", fmt.Errorf("read password: %w", err)
 	}
 	if confirm {
-		fmt.Fprint(out, "Confirm password: ")
+		_, _ = fmt.Fprint(out, "Confirm password: ")
 		second, err := term.ReadPassword(fd)
-		fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out)
 		if err != nil {
 			return "", fmt.Errorf("read password: %w", err)
 		}
